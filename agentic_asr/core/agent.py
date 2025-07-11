@@ -11,6 +11,7 @@ from .models import (
 from .events import EventTopic, PhonyTopic
 from .token_manager import TokenManager
 from .tools import ToolInvoker, ToolExecutor, get_default_tools
+from ..tools.enhanced import get_enhanced_tools
 from .history import HistoryManager
 from ..llm.providers import LLMProvider, create_llm_provider
 from ..utils.logging import logger
@@ -55,7 +56,7 @@ class SimpleAgent:
         self.topic = topic or PhonyTopic()
         self.history_manager = history_manager
         
-        self.tools = tools or get_default_tools()
+        self.tools = tools or get_enhanced_tools()
         
         self.token_manager = TokenManager(max_tokens, recent_token_budget)
         self.tool_invoker = ToolInvoker(self.tools)

@@ -1,44 +1,9 @@
 """Integration with the transcriber to create a real transcription tool."""
-
-from pathlib import Path
+import os
 from typing import Dict, Any
 
-from ..asr.transcriber import WhisperTranscriber
-from ..core.models import ToolDefinition
-
-
-async def real_transcribe_audio_tool(file_path: str, language: str = "auto", model: str = "base") -> Dict[str, Any]:
-    """Tool for transcribing audio files using Whisper."""
-    try:
-        audio_path = Path(file_path)
-        if not audio_path.exists():
-            return {
-                "success": False,
-                "error": f"Audio file not found: {file_path}"
-            }
-
-        transcriber = WhisperTranscriber(model_name=model)
-
-        result = await transcriber.transcribe_file(
-            audio_path,
-            language=language if language != "auto" else None
-        )
-
-        return {
-            "success": True,
-            "transcription": result.text,
-            "language": result.language,
-            "confidence": result.confidence,
-            "duration": result.metadata.get("audio_duration"),
-            "segments_count": result.metadata.get("segments_count"),
-            "model_used": model
-        }
-
-    except Exception as e:
-        return {
-            "success": False,
-            "error": f"Transcription failed: {str(e)}"
-        }
+from ..core.models import ToolDefinition, LLMProviderConfig, History, Message, RoleEnum, MessageType
+from ..llm.providers import create_llm_provider
 
 
 async def analyze_transcription_tool(text: str, analysis_type: str = "summary") -> Dict[str, Any]:
@@ -144,34 +109,116 @@ async def analyze_transcription_tool(text: str, analysis_type: str = "summary") 
         }
 
 
+async def correct_transcription_tool(
+        original_text: str,
+        context: str = "",
+        correction_level: str = "medium",
+) -> Dict[str, Any]:
+    """Tool for correcting transcription errors using LLM intelligence."""
+    try:
+        correction_prompts = {
+            "light": """Please review and lightly correct any obvious transcription errors in the following text. 
+Focus only on clear spelling mistakes, missing punctuation, and obvious word recognition errors. 
+Preserve the original meaning and style as much as possible.
+
+Original transcription: {text}
+{context_section}
+
+Please provide only the corrected text without explanations.""",
+
+            "medium": """Please review and correct transcription errors in the following text.
+Fix spelling mistakes, grammar issues, punctuation, and improve readability while maintaining the original meaning.
+Correct obvious word recognition errors and ensure proper sentence structure.
+
+Original transcription: {text}
+{context_section}
+
+Please provide only the corrected text without explanations.""",
+
+            "heavy": """Please thoroughly review and correct this transcription text.
+Fix all spelling, grammar, and punctuation errors. Improve sentence structure and readability.
+Correct word recognition errors and ensure the text flows naturally while preserving the original meaning and intent.
+
+Original transcription: {text}
+{context_section}
+
+Please provide only the corrected text without explanations."""
+        }
+
+        if correction_level not in correction_prompts:
+            return {
+                "success": False,
+                "error": f"Invalid correction level: {correction_level}. Use 'light', 'medium', or 'heavy'"
+            }
+
+        context_section = f"\nContext: {context}" if context else ""
+
+        prompt = correction_prompts[correction_level].format(
+            text=original_text,
+            context_section=context_section
+        )
+
+        llm_config = LLMProviderConfig(
+            provider_name="openai",
+            model="gpt-4o",
+            api_key=os.getenv("OPENAI_API_KEY"),
+            temperature=0.3
+        )
+
+        # Create LLM provider
+        llm_provider = create_llm_provider(llm_config)
+
+        history = History(session_id="correction_session")
+        user_message = Message(
+            role=RoleEnum.USER,
+            content=prompt,
+            message_type=MessageType.TEXT
+        )
+        history.add_message(user_message)
+
+        response = await llm_provider.generate_response(history=history)
+        corrected_text = response.content.strip()
+
+        # Calculate metrics
+        original_length = len(original_text)
+        corrected_length = len(corrected_text)
+
+        # Simple word-level change detection
+        original_words = original_text.split()
+        corrected_words = corrected_text.split()
+
+        changes_made = 0
+        for i, word in enumerate(original_words):
+            if i >= len(corrected_words) or word != corrected_words[i]:
+                changes_made += 1
+        changes_made += abs(len(original_words) - len(corrected_words))
+
+        return {
+            "success": True,
+            "corrected_text": corrected_text,
+            "original_text": original_text,
+            "correction_level": correction_level,
+            "context_used": context,
+            "metrics": {
+                "original_length": original_length,
+                "corrected_length": corrected_length,
+                "original_word_count": len(original_words),
+                "corrected_word_count": len(corrected_words),
+                "estimated_changes": changes_made,
+                "change_percentage": (changes_made / len(original_words) * 100) if original_words else 0
+            }
+        }
+
+    except Exception as e:
+        return {
+            "success": False,
+            "error": f"Transcription correction failed: {str(e)}"
+        }
+
+
 def get_enhanced_tools() -> list[ToolDefinition]:
     """Get enhanced tools including real transcription capabilities."""
     return [
-        ToolDefinition(
-            name="transcribe_audio",
-            description="Transcribe an audio file to text using Whisper AI",
-            parameters={
-                "type": "object",
-                "properties": {
-                    "file_path": {
-                        "type": "string",
-                        "description": "Path to the audio file to transcribe"
-                    },
-                    "language": {
-                        "type": "string",
-                        "description": "Language code for transcription (e.g., 'en', 'es', 'fr') or 'auto' for auto-detection",
-                        "default": "auto"
-                    },
-                    "model": {
-                        "type": "string",
-                        "description": "Whisper model to use (tiny, base, small, medium, large)",
-                        "default": "base"
-                    }
-                },
-                "required": ["file_path"]
-            },
-            function=real_transcribe_audio_tool
-        ),
         ToolDefinition(
             name="analyze_transcription",
             description="Perform advanced analysis on transcribed text",
@@ -192,5 +239,30 @@ def get_enhanced_tools() -> list[ToolDefinition]:
                 "required": ["text"]
             },
             function=analyze_transcription_tool
+        ),
+        ToolDefinition(
+            name="correct_transcription",
+            description="Correct transcription errors using LLM intelligence",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "original_text": {
+                        "type": "string",
+                        "description": "The original transcribed text with potential errors"
+                    },
+                    "context": {
+                        "type": "string",
+                        "description": "Optional context to help with correction (e.g., topic, speaker details)"
+                    },
+                    "correction_level": {
+                        "type": "string",
+                        "description": "Level of correction to apply: 'light', 'medium', or 'heavy'",
+                        "enum": ["light", "medium", "heavy"],
+                        "default": "medium"
+                    },
+                },
+                "required": ["original_text"]
+            },
+            function=correct_transcription_tool
         )
     ]
