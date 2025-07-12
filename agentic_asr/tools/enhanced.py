@@ -471,6 +471,173 @@ async def get_transcription_summaries_tool(
         }
 
 
+async def translate_transcription_file_tool(
+    filename: str,
+    target_language: str = "english",
+    source_language: str = "auto-detect"
+) -> Dict[str, Any]:
+    """Tool for translating transcription files to target language using LLM."""
+    try:
+        transcription_paths = [
+            Path("data/transcriptions"),
+        ]
+        
+        file_path = None
+        for base_path in transcription_paths:
+            potential_path = base_path / filename
+            if potential_path.exists():
+                file_path = potential_path
+                break
+            
+            for ext in ['.txt', '.json', '.md']:
+                if not filename.endswith(ext):
+                    potential_path = base_path / f"{filename}{ext}"
+                    if potential_path.exists():
+                        file_path = potential_path
+                        break
+            if file_path:
+                break
+        
+        if not file_path:
+            return {
+                "success": False,
+                "error": f"Transcription file '{filename}' not found in any of the transcription directories: {[str(p) for p in transcription_paths]}"
+            }
+        
+        try:
+            with open(file_path, 'r', encoding='utf-8') as f:
+                content = f.read().strip()
+        except Exception as e:
+            return {
+                "success": False,
+                "error": f"Failed to read file: {str(e)}"
+            }
+        
+        if not content:
+            return {
+                "success": False,
+                "error": "File is empty or contains no readable content"
+            }
+
+        if source_language == "auto-detect":
+            translation_prompt = f"""Please translate the following transcription text to {target_language}. 
+If the source text is already in {target_language}, please respond with the original text.
+Maintain the original meaning, tone, and structure as much as possible.
+
+Text to translate:
+{content}
+
+Please provide only the translated text without explanations."""
+        else:
+            translation_prompt = f"""Please translate the following transcription text from {source_language} to {target_language}.
+Maintain the original meaning, tone, and structure as much as possible.
+
+Text to translate:
+{content}
+
+Please provide only the translated text without explanations."""
+
+        llm_config = LLMProviderConfig(
+            provider_name="openai",
+            model="gpt-4o",
+            api_key=os.getenv("OPENAI_API_KEY"),
+            temperature=0.3
+        )
+
+        llm_provider = create_llm_provider(llm_config)
+        
+        history = History(session_id="translation_session")
+        user_message = Message(
+            role=RoleEnum.USER,
+            content=translation_prompt,
+            message_type=MessageType.TEXT
+        )
+        history.add_message(user_message)
+
+        response = await llm_provider.generate_response(history=history)
+        translated_text = response.content.strip()
+
+        original_length = len(content)
+        translated_length = len(translated_text)
+        
+        original_words = content.split()
+        translated_words = translated_text.split()
+
+        result = {
+            "success": True,
+            "file_path": str(file_path),
+            "filename": filename,
+            "source_language": source_language,
+            "target_language": target_language,
+            "original_text": content,
+            "translated_text": translated_text,
+            "metadata": {
+                "original_length": original_length,
+                "translated_length": translated_length,
+                "original_word_count": len(original_words),
+                "translated_word_count": len(translated_words),
+                "file_size_bytes": file_path.stat().st_size,
+                "translation_ratio": translated_length / original_length if original_length > 0 else 0
+            }
+        }
+
+        try:
+            history_manager = HistoryManager()
+            translation_id = await history_manager.save_transcription_translation(
+                filename=filename,
+                file_path=str(file_path),
+                source_language=source_language,
+                target_language=target_language,
+                original_text=content,
+                translated_text=translated_text,
+                metadata=result["metadata"]
+            )
+            result["database_id"] = translation_id
+            result["saved_to_database"] = True
+            await history_manager.close()
+        except Exception as db_error:
+            result["database_error"] = str(db_error)
+            result["saved_to_database"] = False
+
+        return result
+
+    except Exception as e:
+        return {
+            "success": False,
+            "error": f"Translation failed: {str(e)}"
+        }
+
+
+async def get_transcription_translations_tool(
+    filename: str = None,
+    target_language: str = None,
+    limit: int = 10
+) -> Dict[str, Any]:
+    """Tool to retrieve saved transcription translations from database."""
+    try:
+        history_manager = HistoryManager()
+        translations = await history_manager.get_transcription_translations(
+            filename=filename, 
+            target_language=target_language, 
+            limit=limit
+        )
+        await history_manager.close()
+        
+        return {
+            "success": True,
+            "translations": translations,
+            "count": len(translations),
+            "filename_filter": filename,
+            "target_language_filter": target_language
+        }
+        
+    except Exception as e:
+        return {
+            "success": False,
+            "error": f"Failed to retrieve translations: {str(e)}"
+        }
+
+
 def get_enhanced_tools() -> list[ToolDefinition]:
     """Get enhanced tools including real transcription capabilities."""
     return [
@@ -575,5 +742,54 @@ def get_enhanced_tools() -> list[ToolDefinition]:
                 "required": []
             },
             function=get_transcription_summaries_tool
+        ),
+        ToolDefinition(
+            name="translate_transcription_file",
+            description="Translate transcription files to target language using LLM",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "filename": {
+                        "type": "string",
+                        "description": "The filename of the transcription file to translate (will search in transcription directories)"
+                    },
+                    "target_language": {
+                        "type": "string",
+                        "description": "Target language for translation (e.g., 'english', 'spanish', 'french', 'german', 'armenian', etc.)",
+                        "default": "english"
+                    },
+                    "source_language": {
+                        "type": "string",
+                        "description": "Source language of the transcription (use 'auto-detect' to let LLM detect)",
+                        "default": "auto-detect"
+                    }
+                },
+                "required": ["filename"]
+            },
+            function=translate_transcription_file_tool
+        ),
+        ToolDefinition(
+            name="get_transcription_translations",
+            description="Retrieve saved transcription translations from database",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "filename": {
+                        "type": "string",
+                        "description": "Optional filename filter to get translations for a specific file"
+                    },
+                    "target_language": {
+                        "type": "string",
+                        "description": "Optional target language filter to get translations for a specific language"
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Maximum number of translations to retrieve",
+                        "default": 10
+                    }
+                },
+                "required": []
+            },
+            function=get_transcription_translations_tool
         )
     ]

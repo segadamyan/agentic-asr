@@ -58,6 +58,22 @@ class TranscriptionSummaryRecord(Base):
     updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
 
 
+class TranscriptionTranslationRecord(Base):
+    """Database model for transcription translations."""
+    __tablename__ = "transcription_translations"
+
+    id = Column(String, primary_key=True)
+    filename = Column(String, nullable=False)
+    file_path = Column(String, nullable=False)
+    source_language = Column(String, nullable=False)
+    target_language = Column(String, nullable=False)
+    original_text = Column(Text, nullable=False)
+    translated_text = Column(Text, nullable=False)
+    translation_metadata = Column(Text)  # JSON string
+    created_at = Column(DateTime, default=datetime.now)
+    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
+
+
 class HistoryManager:
     """Manages conversation history with persistent storage."""
 
@@ -275,4 +291,82 @@ class HistoryManager:
                     "updated_at": summary.updated_at.isoformat() if summary.updated_at else None
                 }
                 for summary in summaries
+            ]
+
+    async def save_transcription_translation(
+        self,
+        filename: str,
+        file_path: str,
+        source_language: str,
+        target_language: str,
+        original_text: str,
+        translated_text: str,
+        metadata: Dict[str, Any] = None
+    ) -> str:
+        """Save transcription translation to database."""
+        if not self.async_session:
+            await self.initialize()
+
+        from uuid import uuid4
+        translation_id = str(uuid4())
+        
+        async with self.async_session() as session:
+            translation_record = TranscriptionTranslationRecord(
+                id=translation_id,
+                filename=filename,
+                file_path=file_path,
+                source_language=source_language,
+                target_language=target_language,
+                original_text=original_text,
+                translated_text=translated_text,
+                translation_metadata=json.dumps(metadata or {}),
+                created_at=datetime.now()
+            )
+            session.add(translation_record)
+            await session.commit()
+            
+        return translation_id
+
+    async def get_transcription_translations(
+        self, 
+        filename: str = None, 
+        target_language: str = None,
+        limit: int = 100
+    ) -> List[Dict[str, Any]]:
+        """Get transcription translations from database."""
+        if not self.async_session:
+            await self.initialize()
+
+        async with self.async_session() as session:
+            from sqlalchemy import select, desc
+            
+            stmt = select(TranscriptionTranslationRecord).order_by(
+                desc(TranscriptionTranslationRecord.created_at)
+            )
+            
+            if filename:
+                stmt = stmt.where(TranscriptionTranslationRecord.filename == filename)
+            
+            if target_language:
+                stmt = stmt.where(TranscriptionTranslationRecord.target_language == target_language)
+                
+            stmt = stmt.limit(limit)
+            
+            result = await session.execute(stmt)
+            translations = result.scalars().all()
+
+            return [
+                {
+                    "id": translation.id,
+                    "filename": translation.filename,
+                    "file_path": translation.file_path,
+                    "source_language": translation.source_language,
+                    "target_language": translation.target_language,
+                    "original_text": translation.original_text,
+                    "translated_text": translation.translated_text,
+                    "metadata": json.loads(translation.translation_metadata) if translation.translation_metadata else {},
+                    "created_at": translation.created_at.isoformat() if translation.created_at else None,
+                    "updated_at": translation.updated_at.isoformat() if translation.updated_at else None
+                }
+                for translation in translations
             ]
