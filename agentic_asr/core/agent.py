@@ -2,6 +2,7 @@
 
 import uuid
 import logging
+import os
 from typing import List, Optional, Dict, Any
 
 from .models import (
@@ -273,5 +274,25 @@ async def create_asr_agent(
     )
     
     await agent.initialize()
+    
+    transcriptions_dir = "./data/transcriptions"
+    if os.path.exists(transcriptions_dir):
+        transcription_files = [f for f in os.listdir(transcriptions_dir) 
+                              if os.path.isfile(os.path.join(transcriptions_dir, f))]
+        
+        if transcription_files:
+            files_list = "\n".join([f"- {file}" for file in transcription_files])
+            transcription_message = f"""I have access to the following transcription files in the data/transcriptions folder:
+
+{files_list}
+
+I can help you analyze, summarize, or work with any of these transcriptions. Just let me know what you'd like to do!"""
+            
+            user_message = Message(
+                role=RoleEnum.USER,
+                content=transcription_message,
+                message_type=MessageType.TEXT
+            )
+            agent.history.add_message(user_message)
     
     return agent
