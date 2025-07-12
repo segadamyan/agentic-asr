@@ -42,6 +42,22 @@ class MessageRecord(Base):
     message_metadata = Column(Text)  # JSON string
 
 
+class TranscriptionSummaryRecord(Base):
+    """Database model for transcription summaries."""
+    __tablename__ = "transcription_summaries"
+
+    id = Column(String, primary_key=True)
+    filename = Column(String, nullable=False)
+    file_path = Column(String, nullable=False)
+    summary_type = Column(String, nullable=False)
+    summary = Column(Text, nullable=False)
+    key_points = Column(Text)  # JSON string
+    actions = Column(Text)  # JSON string
+    summary_metadata = Column(Text)  # JSON string
+    created_at = Column(DateTime, default=datetime.now)
+    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
+
+
 class HistoryManager:
     """Manages conversation history with persistent storage."""
 
@@ -163,8 +179,8 @@ class HistoryManager:
             return [
                 {
                     "session_id": conv.session_id,
-                    "created_at": conv.created_at,
-                    "updated_at": conv.updated_at,
+                    "created_at": conv.created_at.isoformat() if conv.created_at else None,
+                    "updated_at": conv.updated_at.isoformat() if conv.updated_at else None,
                     "metadata": json.loads(conv.session_metadata) if conv.session_metadata else {}
                 }
                 for conv in conversations
@@ -190,3 +206,73 @@ class HistoryManager:
         """Close database connections."""
         if self.engine:
             await self.engine.dispose()
+
+    async def save_transcription_summary(
+        self, 
+        filename: str,
+        file_path: str,
+        summary_type: str,
+        summary: str,
+        key_points: List[str] = None,
+        actions: List[str] = None,
+        metadata: Dict[str, Any] = None
+    ) -> str:
+        """Save transcription summary to database."""
+        if not self.async_session:
+            await self.initialize()
+
+        from uuid import uuid4
+        summary_id = str(uuid4())
+        
+        async with self.async_session() as session:
+            summary_record = TranscriptionSummaryRecord(
+                id=summary_id,
+                filename=filename,
+                file_path=file_path,
+                summary_type=summary_type,
+                summary=summary,
+                key_points=json.dumps(key_points or []),
+                actions=json.dumps(actions or []),
+                summary_metadata=json.dumps(metadata or {}),
+                created_at=datetime.now()
+            )
+            session.add(summary_record)
+            await session.commit()
+            
+        return summary_id
+
+    async def get_transcription_summaries(self, filename: str = None, limit: int = 100) -> List[Dict[str, Any]]:
+        """Get transcription summaries from database."""
+        if not self.async_session:
+            await self.initialize()
+
+        async with self.async_session() as session:
+            from sqlalchemy import select, desc
+            
+            if filename:
+                stmt = select(TranscriptionSummaryRecord).where(
+                    TranscriptionSummaryRecord.filename == filename
+                ).order_by(desc(TranscriptionSummaryRecord.created_at)).limit(limit)
+            else:
+                stmt = select(TranscriptionSummaryRecord).order_by(
+                    desc(TranscriptionSummaryRecord.created_at)
+                ).limit(limit)
+            
+            result = await session.execute(stmt)
+            summaries = result.scalars().all()
+
+            return [
+                {
+                    "id": summary.id,
+                    "filename": summary.filename,
+                    "file_path": summary.file_path,
+                    "summary_type": summary.summary_type,
+                    "summary": summary.summary,
+                    "key_points": json.loads(summary.key_points) if summary.key_points else [],
+                    "actions": json.loads(summary.actions) if summary.actions else [],
+                    "metadata": json.loads(summary.summary_metadata) if summary.summary_metadata else {},
+                    "created_at": summary.created_at.isoformat() if summary.created_at else None,
+                    "updated_at": summary.updated_at.isoformat() if summary.updated_at else None
+                }
+                for summary in summaries
+            ]
