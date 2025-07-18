@@ -121,30 +121,31 @@ async def correct_transcription_tool(
         correction_prompts = {
             "light": """Please review and lightly correct any obvious transcription errors in the following text. 
 Focus only on clear spelling mistakes, missing punctuation, and obvious word recognition errors. 
-Preserve the original meaning and style as much as possible.
+Preserve the original meaning, style, and LANGUAGE as much as possible. Keep the corrected text in the same language as the original.
 
 Original transcription: {text}
 {context_section}
 
-Please provide only the corrected text without explanations.""",
+Please provide only the corrected text without explanations, maintaining the same language as the original.""",
 
             "medium": """Please review and correct transcription errors in the following text.
-Fix spelling mistakes, grammar issues, punctuation, and improve readability while maintaining the original meaning.
-Correct obvious word recognition errors and ensure proper sentence structure.
+Fix spelling mistakes, grammar issues, punctuation, and improve readability while maintaining the original meaning and LANGUAGE.
+Correct obvious word recognition errors and ensure proper sentence structure. Keep the corrected text in the same language as the original.
 
 Original transcription: {text}
 {context_section}
 
-Please provide only the corrected text without explanations.""",
+Please provide only the corrected text without explanations, maintaining the same language as the original.""",
 
             "heavy": """Please thoroughly review and correct this transcription text.
 Fix all spelling, grammar, and punctuation errors. Improve sentence structure and readability.
-Correct word recognition errors and ensure the text flows naturally while preserving the original meaning and intent.
+Correct word recognition errors and ensure the text flows naturally while preserving the original meaning, intent, and LANGUAGE.
+Keep the corrected text in the same language as the original transcription.
 
 Original transcription: {text}
 {context_section}
 
-Please provide only the corrected text without explanations."""
+Please provide only the corrected text without explanations, maintaining the same language as the original."""
         }
 
         if correction_level not in correction_prompts:
@@ -269,41 +270,49 @@ async def summarize_transcription_file_tool(
             }
 
         summary_prompts = {
-            "brief": """Please provide a brief summary of the following transcription in 2-3 sentences:
+            "brief": """Please analyze the language of the following transcription and provide a brief summary in the SAME LANGUAGE as the original transcription. If the transcription is in Armenian, summarize in Armenian. If it's in English, summarize in English, etc.
+
+Provide a brief summary in 2-3 sentences in the same language as the transcription:
 
 {content}
 
-Provide only the summary without explanations.""",
+Provide only the summary without explanations, and ensure it's in the same language as the original text.""",
 
-            "detailed": """Please provide a detailed summary of the following transcription, covering all main topics and important details:
+            "detailed": """Please analyze the language of the following transcription and provide a detailed summary in the SAME LANGUAGE as the original transcription. If the transcription is in Armenian, summarize in Armenian. If it's in English, summarize in English, etc.
+
+Provide a detailed summary covering all main topics and important details in the same language as the transcription:
 
 {content}
 
-Provide only the summary without explanations.""",
+Provide only the summary without explanations, and ensure it's in the same language as the original text.""",
 
-            "comprehensive": """Please analyze the following transcription and provide:
+            "comprehensive": """Please analyze the language of the following transcription and provide your analysis in the SAME LANGUAGE as the original transcription. If the transcription is in Armenian, respond in Armenian. If it's in English, respond in English, etc.
+
+Please analyze the following transcription and provide:
 1. A comprehensive summary
 2. Key points (bullet format)
 3. Action items or tasks mentioned (if any)
+
+All responses should be in the same language as the original transcription.
 
 Transcription:
 {content}
 
 Format your response as:
 SUMMARY:
-[Your summary here]
+[Your summary here in the same language as the transcription]
 
 KEY POINTS:
-• [Point 1]
-• [Point 2]
-• [Point 3]
+• [Point 1 in the same language]
+• [Point 2 in the same language]
+• [Point 3 in the same language]
 ...
 
 ACTIONS:
-• [Action 1]
-• [Action 2]
+• [Action 1 in the same language]
+• [Action 2 in the same language]
 ...
-(If no actions are mentioned, write "No specific actions identified")"""
+(If no actions are mentioned, write "No specific actions identified" in the same language as the transcription)"""
         }
 
         if summary_type not in summary_prompts:
