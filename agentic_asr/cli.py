@@ -86,7 +86,7 @@ def transcribe(
 def chat(
         session_id: Optional[str] = typer.Option(None, "--session", "-s", help="Session ID to continue conversation"),
         llm_provider: str = typer.Option("openai", "--provider", "-p", help="LLM provider (openai, anthropic)"),
-        model: str = typer.Option("gpt-4", "--model", "-m", help="LLM model to use"),
+        model: str = typer.Option("gpt-4o", "--model", "-m", help="LLM model to use"),
         database_url: Optional[str] = typer.Option(None, "--db", help="Database URL for history storage"),
         verbose: bool = typer.Option(False, "--verbose", "-v", help="Verbose output")
 ):
@@ -171,7 +171,7 @@ def process(
         output: Optional[str] = typer.Option(None, "--output", "-o", help="Output file for results"),
         whisper_model: str = typer.Option("base", "--whisper-model", help="Whisper model for transcription"),
         llm_provider: str = typer.Option("openai", "--provider", "-p", help="LLM provider"),
-        llm_model: str = typer.Option("gpt-4", "--model", "-m", help="LLM model"),
+        llm_model: str = typer.Option("gpt-4o", "--model", "-m", help="LLM model"),
         language: Optional[str] = typer.Option(None, "--language", "-l", help="Audio language code"),
         verbose: bool = typer.Option(False, "--verbose", "-v", help="Verbose output")
 ):

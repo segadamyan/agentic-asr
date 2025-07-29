@@ -258,7 +258,7 @@ async def create_asr_agent(
     if not llm_config:
         llm_config = LLMProviderConfig(
             provider_name="openai",
-            model="gpt-4",
+            model="gpt-4o",
             temperature=0.7
         )
     
