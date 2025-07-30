@@ -229,7 +229,9 @@ async def summarize_transcription_file_tool(
     """Tool for comprehensive summarization of transcription files with key points and action extraction."""
     try:
         transcription_paths = [
-            Path("data/transcriptions"),
+            Path("../data/transcriptions"),  # From api directory
+            Path("data/transcriptions"),      # From project root
+            Path("/Users/sadamyan/workdir/agentic-asr/data/transcriptions"),  # Absolute path
         ]
         
         file_path = None
@@ -488,7 +490,9 @@ async def translate_transcription_file_tool(
     """Tool for translating transcription files to target language using LLM."""
     try:
         transcription_paths = [
-            Path("data/transcriptions"),
+            Path("../data/transcriptions"),  # From api directory
+            Path("data/transcriptions"),      # From project root
+            Path("/Users/sadamyan/workdir/agentic-asr/data/transcriptions"),  # Absolute path
         ]
         
         file_path = None
