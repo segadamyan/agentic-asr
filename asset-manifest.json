@@ -1,0 +1,13 @@
+{
+  "files": {
+    "main.css": "/agentic-asr/static/css/main.23958e20.css",
+    "main.js": "/agentic-asr/static/js/main.07efa583.js",
+    "index.html": "/agentic-asr/index.html",
+    "main.23958e20.css.map": "/agentic-asr/static/css/main.23958e20.css.map",
+    "main.07efa583.js.map": "/agentic-asr/static/js/main.07efa583.js.map"
+  },
+  "entrypoints": [
+    "static/css/main.23958e20.css",
+    "static/js/main.07efa583.js"
+  ]
+}
