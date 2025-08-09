@@ -19,9 +19,10 @@ DEFAULT_LLM_MODEL=gpt-4o
 
 ### ⚡ **Optimized Build**
 The deployment uses:
-- **Nixpacks** for faster Python builds
-- **Lightweight requirements** (`railway-requirements.txt`)
+- **Docker** with lightweight Python slim image
+- **Optimized requirements** (`railway-requirements.txt`)
 - **Optional audio processing** (transcription features disabled for faster deployment)
+- **Multi-stage build optimization** for smaller image size
 
 ### 📋 **Available Features**
 ✅ **Chat with AI Agent**  

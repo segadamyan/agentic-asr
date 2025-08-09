@@ -1,0 +1,79 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Distribution / packaging
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Unit test / coverage reports
+htmlcov/
+.tox/
+.coverage
+.pytest_cache/
+
+# Environments
+.env
+.venv
+env/
+venv/
+ENV/
+
+# IDE
+.idea/
+.vscode/
+
+# OS
+.DS_Store
+
+# Git
+.git/
+.gitignore
+
+# Data directories (exclude large data from build)
+data/transcriptions/
+data/uploads/
+logs/
+downloads/
+
+# Audio files (exclude from build)
+*.mp3
+*.wav
+*.m4a
+*.flac
+*.ogg
+
+# Large model files
+*.pt
+*.pth
+*.bin
+*.safetensors
+
+# Frontend build artifacts
+frontend/node_modules/
+frontend/build/
+
+# Development files
+tests/
+research/
+examples/NVIDIA_AI_Podcast.mp3
+
+# Documentation
+README.md
+*.md
+!railway-requirements.txt
