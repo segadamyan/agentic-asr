@@ -91,7 +91,14 @@ app = FastAPI(
 # Add CORS middleware
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000", "http://127.0.0.1:3000"],  # React dev server
+    allow_origins=[
+        "http://localhost:3000", 
+        "http://127.0.0.1:3000",  # React dev server
+        "https://segadamyan.github.io",  # GitHub Pages
+        "https://*.railway.app",  # Railway deployment
+        "https://*.vercel.app",   # Vercel deployment
+        "https://*.herokuapp.com"  # Heroku deployment
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -449,10 +456,12 @@ async def serve_react_app(full_path: str):
         return {"message": "React frontend not built. Run 'npm run build' in the frontend directory."}
 
 if __name__ == "__main__":
+    import os
+    port = int(os.getenv("PORT", 8000))
     uvicorn.run(
         "main:app", 
         host="0.0.0.0", 
-        port=8000, 
-        reload=True,
+        port=port, 
+        reload=False,  # Disable reload in production
         log_level="info"
     )
