@@ -1,11 +1,24 @@
 """Integration with the transcriber to create a real transcription tool."""
 import os
 from pathlib import Path
-from typing import Dict, Any
+from typing import Dict, Any, List
+from pydantic import BaseModel
+import json
+import os
+import re
 
 from ..core.history import HistoryManager
 from ..core.models import ToolDefinition, LLMProviderConfig, History, Message, RoleEnum, MessageType
 from ..llm.providers import create_llm_provider
+
+
+# Pydantic models for structured outputs
+class TranscriptionSummary(BaseModel):
+    """Structured output model for transcription summarization."""
+    summary: str
+    key_points: List[str]
+    actions: List[str]
+    language_detected: str
 
 
 async def analyze_transcription_tool(text: str, analysis_type: str = "summary") -> Dict[str, Any]:
@@ -156,11 +169,6 @@ Please provide only the corrected text without explanations, maintaining the sam
 
         context_section = f"\nContext: {context}" if context else ""
 
-        prompt = correction_prompts[correction_level].format(
-            text=original_text,
-            context_section=context_section
-        )
-
         llm_config = LLMProviderConfig(
             provider_name="openai",
             model="gpt-4o",
@@ -171,16 +179,56 @@ Please provide only the corrected text without explanations, maintaining the sam
         # Create LLM provider
         llm_provider = create_llm_provider(llm_config)
 
-        history = History(session_id="correction_session")
-        user_message = Message(
-            role=RoleEnum.USER,
-            content=prompt,
-            message_type=MessageType.TEXT
-        )
-        history.add_message(user_message)
+        # Check if content needs chunking for correction
+        estimated_tokens = len(original_text) // 4  # Rough estimate: 1 token ≈ 4 characters
 
-        response = await llm_provider.generate_response(history=history)
-        corrected_text = response.content.strip()
+        if estimated_tokens > 100000:  # If content is too large, chunk it
+            chunks = chunk_text(original_text, max_tokens=25000)  # Smaller chunks for correction
+            
+            # Correct each chunk
+            corrected_chunks = []
+            for i, chunk in enumerate(chunks):
+                chunk_prompt = correction_prompts[correction_level].format(
+                    text=chunk,
+                    context_section=context_section
+                )
+                
+                history = History(session_id=f"correction_session_chunk_{i}")
+                user_message = Message(
+                    role=RoleEnum.USER,
+                    content=chunk_prompt,
+                    message_type=MessageType.TEXT
+                )
+                history.add_message(user_message)
+
+                try:
+                    response = await llm_provider.generate_response(history=history)
+                    corrected_chunks.append(response.content.strip())
+                except Exception as e:
+                    return {
+                        "success": False,
+                        "error": f"Failed to correct chunk {i+1}/{len(chunks)}: {str(e)}"
+                    }
+            
+            # Combine corrected chunks with better joining
+            corrected_text = " ".join(corrected_chunks)  # Use space instead of double newlines for corrections
+        else:
+            # Content is small enough to process directly
+            prompt = correction_prompts[correction_level].format(
+                text=original_text,
+                context_section=context_section
+            )
+
+            history = History(session_id="correction_session")
+            user_message = Message(
+                role=RoleEnum.USER,
+                content=prompt,
+                message_type=MessageType.TEXT
+            )
+            history.add_message(user_message)
+
+            response = await llm_provider.generate_response(history=history)
+            corrected_text = response.content.strip()
 
         # Calculate metrics
         original_length = len(original_text)
@@ -219,6 +267,158 @@ Please provide only the corrected text without explanations, maintaining the sam
         }
 
 
+def chunk_text(text: str, max_tokens: int = 30000) -> list[str]:
+    """
+    Split text into chunks that fit within token limits.
+    Uses approximate token counting (1 token ≈ 4 characters for safety).
+    Handles various text formats including single-line transcriptions.
+    """
+    # Approximate max characters per chunk (conservative estimate)
+    max_chars = max_tokens * 3  # Being conservative with token estimation
+    
+    if len(text) <= max_chars:
+        return [text]
+    
+    chunks = []
+    current_chunk = ""
+    
+    # Strategy 1: Try splitting by double newlines (paragraphs)
+    paragraphs = text.split('\n\n')
+    
+    # If we have meaningful paragraphs (more than 1 and not just the whole text)
+    if len(paragraphs) > 1 and len(paragraphs[0]) < len(text) * 0.9:
+        for paragraph in paragraphs:
+            if len(current_chunk) + len(paragraph) + 2 > max_chars:
+                if current_chunk.strip():
+                    chunks.append(current_chunk.strip())
+                    current_chunk = paragraph
+                else:
+                    # Single paragraph is too long, need to split it further
+                    para_chunks = _split_large_text(paragraph, max_chars)
+                    chunks.extend(para_chunks)
+                    current_chunk = ""
+            else:
+                current_chunk += "\n\n" + paragraph if current_chunk else paragraph
+    else:
+        # Strategy 2: Single line or no meaningful paragraphs - split by other methods
+        current_chunk = text
+    
+    # If we still have a large chunk, split it
+    if current_chunk and len(current_chunk) > max_chars:
+        final_chunks = _split_large_text(current_chunk, max_chars)
+        chunks.extend(final_chunks)
+    elif current_chunk.strip():
+        chunks.append(current_chunk.strip())
+    
+    return chunks
+
+
+def _split_large_text(text: str, max_chars: int) -> list[str]:
+    """
+    Helper function to split large text using multiple strategies.
+    """
+    chunks = []
+    current_chunk = ""
+    
+    # Strategy 1: Split by sentences (periods followed by space and capital letter or end)
+    import re
+    sentences = re.split(r'(?<=[.!?])\s+(?=[A-ZԱ-Ֆա-և])', text)
+    
+    if len(sentences) > 1:
+        for sentence in sentences:
+            if len(current_chunk) + len(sentence) + 1 > max_chars:
+                if current_chunk.strip():
+                    chunks.append(current_chunk.strip())
+                    current_chunk = sentence
+                else:
+                    # Single sentence is too long, split by other methods
+                    sentence_chunks = _split_by_punctuation(sentence, max_chars)
+                    chunks.extend(sentence_chunks)
+                    current_chunk = ""
+            else:
+                current_chunk += " " + sentence if current_chunk else sentence
+    else:
+        # Strategy 2: If no sentences, split by other punctuation
+        current_chunk = text
+    
+    # If we still have a large chunk, split by punctuation
+    if current_chunk and len(current_chunk) > max_chars:
+        punct_chunks = _split_by_punctuation(current_chunk, max_chars)
+        chunks.extend(punct_chunks)
+    elif current_chunk.strip():
+        chunks.append(current_chunk.strip())
+    
+    return chunks
+
+
+def _split_by_punctuation(text: str, max_chars: int) -> list[str]:
+    """
+    Split text by various punctuation marks when sentences don't work.
+    """
+    chunks = []
+    current_chunk = ""
+    
+    # Split by commas, semicolons, colons, and other punctuation
+    import re
+    segments = re.split(r'([,;:])\s*', text)
+    
+    if len(segments) > 1:
+        for i in range(0, len(segments), 2):
+            segment = segments[i]
+            punct = segments[i + 1] if i + 1 < len(segments) else ""
+            full_segment = segment + punct
+            
+            if len(current_chunk) + len(full_segment) > max_chars:
+                if current_chunk.strip():
+                    chunks.append(current_chunk.strip())
+                    current_chunk = full_segment
+                else:
+                    # Even single segment is too long, split by words
+                    word_chunks = _split_by_words(full_segment, max_chars)
+                    chunks.extend(word_chunks)
+                    current_chunk = ""
+            else:
+                current_chunk += full_segment
+    else:
+        # No punctuation, split by words as last resort
+        current_chunk = text
+    
+    # If we still have a large chunk, split by words
+    if current_chunk and len(current_chunk) > max_chars:
+        word_chunks = _split_by_words(current_chunk, max_chars)
+        chunks.extend(word_chunks)
+    elif current_chunk.strip():
+        chunks.append(current_chunk.strip())
+    
+    return chunks
+
+
+def _split_by_words(text: str, max_chars: int) -> list[str]:
+    """
+    Split text by words as the last resort.
+    """
+    chunks = []
+    current_chunk = ""
+    words = text.split()
+    
+    for word in words:
+        if len(current_chunk) + len(word) + 1 > max_chars:
+            if current_chunk.strip():
+                chunks.append(current_chunk.strip())
+                current_chunk = word
+            else:
+                # Single word is extremely long (rare), just add it
+                chunks.append(word)
+                current_chunk = ""
+        else:
+            current_chunk += " " + word if current_chunk else word
+    
+    if current_chunk.strip():
+        chunks.append(current_chunk.strip())
+    
+    return chunks
+
+
 async def summarize_transcription_file_tool(
     filename: str,
     summary_type: str = "comprehensive",
@@ -227,52 +427,75 @@ async def summarize_transcription_file_tool(
     max_summary_length: int = 500
 ) -> Dict[str, Any]:
     """Tool for comprehensive summarization of transcription files with key points and action extraction."""
-    try:
-        transcription_paths = [
-            Path("../data/transcriptions"),  # From api directory
-            Path("data/transcriptions"),      # From project root
-            Path("/Users/sadamyan/workdir/agentic-asr/data/transcriptions"),  # Absolute path
-        ]
+    transcription_paths = [
+        Path("../data/transcriptions"),  # From api directory
+        Path("data/transcriptions"),      # From project root
+        Path("/Users/sadamyan/workdir/agentic-asr/data/transcriptions"),  # Absolute path
+    ]
+    
+    file_path = None
+    for base_path in transcription_paths:
+        # First try exact match
+        potential_path = base_path / filename
+        if potential_path.exists():
+            file_path = potential_path
+            break
         
-        file_path = None
-        for base_path in transcription_paths:
-            potential_path = base_path / filename
-            if potential_path.exists():
-                file_path = potential_path
-                break
+        # Try with different extensions if not already has one
+        for ext in ['.txt', '.json', '.md']:
+            if not filename.endswith(ext):
+                potential_path = base_path / f"{filename}{ext}"
+                if potential_path.exists():
+                    file_path = potential_path
+                    break
+        if file_path:
+            break
             
-            for ext in ['.txt', '.json', '.md']:
-                if not filename.endswith(ext):
-                    potential_path = base_path / f"{filename}{ext}"
-                    if potential_path.exists():
-                        file_path = potential_path
-                        break
-            if file_path:
-                break
-        
-        if not file_path:
-            return {
-                "success": False,
-                "error": f"Transcription file '{filename}' not found in any of the transcription directories: {[str(p) for p in transcription_paths]}"
-            }
-        
-        try:
-            with open(file_path, 'r', encoding='utf-8') as f:
-                content = f.read().strip()
-        except Exception as e:
-            return {
-                "success": False,
-                "error": f"Failed to read file: {str(e)}"
-            }
-        
-        if not content:
-            return {
-                "success": False,
-                "error": "File is empty or contains no readable content"
-            }
+        # Try fuzzy matching for common variations (spaces, case, etc.)
+        if not file_path and base_path.exists():
+            import re
+            # Create a pattern that allows for flexible matching
+            normalized_filename = re.sub(r'[^\w]', '', filename.lower())
+            for file_candidate in base_path.glob('*'):
+                if file_candidate.is_file():
+                    candidate_normalized = re.sub(r'[^\w]', '', file_candidate.stem.lower())
+                    if normalized_filename in candidate_normalized or candidate_normalized in normalized_filename:
+                        # Additional check for common patterns like "Rearrange #261" vs "Rearrange#261"
+                        if abs(len(normalized_filename) - len(candidate_normalized)) <= 2:
+                            file_path = file_candidate
+                            break
+        if file_path:
+            break
+    
+    if not file_path:
+        return {
+            "success": False,
+            "error": f"Transcription file '{filename}' not found in any of the transcription directories: {[str(p) for p in transcription_paths]}"
+        }
+    
+    try:
+        with open(file_path, 'r', encoding='utf-8') as f:
+            content = f.read().strip()
+    except Exception as e:
+        return {
+            "success": False,
+            "error": f"Failed to read file: {str(e)}"
+        }
+    
+    if not content:
+        return {
+            "success": False,
+            "error": "File is empty or contains no readable content"
+        }
 
-        summary_prompts = {
-            "brief": """Please analyze the language of the following transcription and provide a brief summary in the SAME LANGUAGE as the original transcription. If the transcription is in Armenian, summarize in Armenian. If it's in English, summarize in English, etc.
+    # Debug info: print content stats
+    print(f"File successfully found: {file_path}")
+    print(f"Content length: {len(content)} characters")
+    print(f"First 200 characters: {content[:200]}...")
+    print(f"Summary type: {summary_type}, Extract actions: {extract_actions}, Extract key points: {extract_key_points}, Max summary length: {max_summary_length}")
+
+    summary_prompts = {
+        "brief": """Please analyze the language of the following transcription and provide a brief summary in the SAME LANGUAGE as the original transcription. If the transcription is in Armenian, summarize in Armenian. If it's in English, summarize in English, etc.
 
 Provide a brief summary in 2-3 sentences in the same language as the transcription:
 
@@ -280,7 +503,7 @@ Provide a brief summary in 2-3 sentences in the same language as the transcripti
 
 Provide only the summary without explanations, and ensure it's in the same language as the original text.""",
 
-            "detailed": """Please analyze the language of the following transcription and provide a detailed summary in the SAME LANGUAGE as the original transcription. If the transcription is in Armenian, summarize in Armenian. If it's in English, summarize in English, etc.
+        "detailed": """Please analyze the language of the following transcription and provide a detailed summary in the SAME LANGUAGE as the original transcription. If the transcription is in Armenian, summarize in Armenian. If it's in English, summarize in English, etc.
 
 Provide a detailed summary covering all main topics and important details in the same language as the transcription:
 
@@ -288,51 +511,159 @@ Provide a detailed summary covering all main topics and important details in the
 
 Provide only the summary without explanations, and ensure it's in the same language as the original text.""",
 
-            "comprehensive": """Please analyze the language of the following transcription and provide your analysis in the SAME LANGUAGE as the original transcription. If the transcription is in Armenian, respond in Armenian. If it's in English, respond in English, etc.
-
-Please analyze the following transcription and provide:
-1. A comprehensive summary
-2. Key points (bullet format)
-3. Action items or tasks mentioned (if any)
-
-All responses should be in the same language as the original transcription.
+        "comprehensive": """Please analyze the following transcription and provide a comprehensive analysis in the SAME LANGUAGE as the original transcription.
 
 Transcription:
 {content}
 
-Format your response as:
-SUMMARY:
-[Your summary here in the same language as the transcription]
+Please provide:
+1. A comprehensive summary in the same language as the transcription
+2. Key points extracted from the content (as a list)
+3. Action items or tasks mentioned (as a list, empty if none)
+4. The detected language of the transcription
 
-KEY POINTS:
-• [Point 1 in the same language]
-• [Point 2 in the same language]
-• [Point 3 in the same language]
-...
+Ensure all text content (summary, key points, actions) is in the same language as the original transcription."""
+    }
 
-ACTIONS:
-• [Action 1 in the same language]
-• [Action 2 in the same language]
-...
-(If no actions are mentioned, write "No specific actions identified" in the same language as the transcription)"""
+    if summary_type not in summary_prompts:
+        return {
+            "success": False,
+            "error": f"Invalid summary type: {summary_type}. Use 'brief', 'detailed', or 'comprehensive'"
         }
 
-        if summary_type not in summary_prompts:
-            return {
-                "success": False,
-                "error": f"Invalid summary type: {summary_type}. Use 'brief', 'detailed', or 'comprehensive'"
-            }
+    # Check if content needs chunking (estimate tokens)
+    estimated_tokens = len(content) // 4  # Rough estimate: 1 token ≈ 4 characters
+    
+    print(f"Esimated tokens: {estimated_tokens}, Max summary length: {max_summary_length}")
 
+    llm_config = LLMProviderConfig(
+        provider_name="openai",
+        model="gpt-4o",
+        api_key=os.getenv("OPENAI_API_KEY"),
+        temperature=0.3
+    )
+    llm_provider = create_llm_provider(llm_config)
+
+    # For comprehensive summaries, we'll use structured outputs
+    use_structured_output = (summary_type == "comprehensive")
+
+    if estimated_tokens > 100000:  # If content is too large, chunk it
+        chunks = chunk_text(content, max_tokens=25000)  # Slightly smaller chunks for better processing
+        
+        print(f"Content is large ({estimated_tokens} estimated tokens), splitting into {len(chunks)} chunks")
+        
+        # Process each chunk and collect summaries
+        chunk_summaries = []
+        chunk_structured_data = []
+        
+        for i, chunk in enumerate(chunks):
+            print(f"Processing chunk {i+1}/{len(chunks)} (length: {len(chunk)} chars)")
+            chunk_prompt = summary_prompts[summary_type].format(content=chunk)
+            
+            history = History(session_id=f"summarization_session_chunk_{i}")
+            user_message = Message(
+                role=RoleEnum.USER,
+                content=chunk_prompt,
+                message_type=MessageType.TEXT
+            )
+            history.add_message(user_message)
+
+            try:
+                if use_structured_output:
+                    # Use structured output for comprehensive summaries
+                    response = await llm_provider.generate_structured_response(
+                        history=history,
+                        response_format=TranscriptionSummary
+                    )
+                    # Extract structured content from the response
+                    if hasattr(response, '_structured_content'):
+                        chunk_structured_data.append(response._structured_content)
+                    else:
+                        # Fallback: parse from JSON content
+                        import json
+                        content_dict = json.loads(response.content)
+                        chunk_structured_data.append(TranscriptionSummary(**content_dict))
+                    print(f"Successfully processed chunk {i+1} with structured output")
+                else:
+                    response = await llm_provider.generate_response(history=history)
+                    chunk_summaries.append(response.content.strip())
+                    print(f"Successfully processed chunk {i+1}")
+            except Exception as e:
+                return {
+                    "success": False,
+                    "error": f"Failed to process chunk {i+1}/{len(chunks)}: {str(e)}"
+                }
+        
+        if use_structured_output:
+            # Combine structured data from chunks
+            all_summaries = [chunk.summary for chunk in chunk_structured_data]
+            all_key_points = []
+            all_actions = []
+            detected_language = chunk_structured_data[0].language_detected if chunk_structured_data else "unknown"
+            
+            for chunk_data in chunk_structured_data:
+                all_key_points.extend(chunk_data.key_points)
+                all_actions.extend(chunk_data.actions)
+            
+            # Create a final consolidated summary using structured output
+            combined_text = "\n\n".join(all_summaries)
+            final_prompt = f"""Please analyze the language of the following chunk summaries and provide a final consolidated analysis in the SAME LANGUAGE as the original transcription.
+
+These are summaries of different parts of a large transcription. Please create a coherent final analysis:
+
+{combined_text}
+
+Key points from chunks: {'; '.join(all_key_points[:20])}
+Actions from chunks: {'; '.join(all_actions[:10])}
+
+Please provide a final consolidated summary, refined key points, and consolidated actions all in the same language as the original transcription."""
+            
+            final_history = History(session_id="final_summarization_session")
+            final_message = Message(
+                role=RoleEnum.USER,
+                content=final_prompt,
+                message_type=MessageType.TEXT
+            )
+            final_history.add_message(final_message)
+
+            final_response = await llm_provider.generate_structured_response(
+                history=final_history,
+                response_format=TranscriptionSummary
+            )
+            # Extract structured content from the response
+            if hasattr(final_response, '_structured_content'):
+                structured_result = final_response._structured_content
+            else:
+                # Fallback: parse from JSON content
+                import json
+                content_dict = json.loads(final_response.content)
+                structured_result = TranscriptionSummary(**content_dict)
+        else:
+            # Now summarize the chunk summaries for non-comprehensive
+            combined_summaries = "\n\n".join(chunk_summaries)
+            
+            final_prompt = f"""Please analyze the language of the following chunk summaries and provide a final consolidated summary in the SAME LANGUAGE as the original transcription.
+
+These are summaries of different parts of a large transcription. Please create a coherent final summary in the same language:
+
+{combined_summaries}
+
+Please provide a final consolidated summary in the same language as the original transcription."""
+            
+            final_history = History(session_id="final_summarization_session")
+            final_message = Message(
+                role=RoleEnum.USER,
+                content=final_prompt,
+                message_type=MessageType.TEXT
+            )
+            final_history.add_message(final_message)
+
+            response = await llm_provider.generate_response(history=final_history)
+            llm_output = response.content.strip()
+        
+    else:
+        # Content is small enough to process directly
         prompt = summary_prompts[summary_type].format(content=content)
-
-        llm_config = LLMProviderConfig(
-            provider_name="openai",
-            model="gpt-4o",
-            api_key=os.getenv("OPENAI_API_KEY"),
-            temperature=0.3
-        )
-
-        llm_provider = create_llm_provider(llm_config)
         
         history = History(session_id="summarization_session")
         user_message = Message(
@@ -342,10 +673,45 @@ ACTIONS:
         )
         history.add_message(user_message)
 
-        response = await llm_provider.generate_response(history=history)
-        llm_output = response.content.strip()
+        if use_structured_output:
+            response = await llm_provider.generate_structured_response(
+                history=history,
+                response_format=TranscriptionSummary
+            )
+            # Extract structured content from the response
+            if hasattr(response, '_structured_content'):
+                structured_result = response._structured_content
+            else:
+                # Fallback: parse from JSON content
+                import json
+                content_dict = json.loads(response.content)
+                structured_result = TranscriptionSummary(**content_dict)
+        else:
+            response = await llm_provider.generate_response(history=history)
+            llm_output = response.content.strip()
 
-        if summary_type == "comprehensive":
+    # Debug info: print LLM response stats
+    if use_structured_output:
+        print(f"Structured output received:")
+        print(f"Summary length: {len(structured_result.summary)} characters")
+        print(f"Key points: {len(structured_result.key_points)}")
+        print(f"Actions: {len(structured_result.actions)}")
+        print(f"Language detected: {structured_result.language_detected}")
+    else:
+        print(f"LLM response length: {len(llm_output)} characters")
+        print(f"LLM response first 300 characters: {llm_output[:300]}...")
+
+    if summary_type == "comprehensive":
+        if use_structured_output:
+            # Use structured output directly - no parsing needed!
+            summary = structured_result.summary
+            key_points = structured_result.key_points if extract_key_points else []
+            actions = structured_result.actions if extract_actions else []
+            
+            # Filter out empty actions or "no actions" statements
+            actions = [action for action in actions if action and not action.lower().strip().startswith("no specific actions")]
+        else:
+            # Fallback to old parsing method for compatibility
             summary = ""
             key_points = []
             actions = []
@@ -355,12 +721,19 @@ ACTIONS:
             
             for section in sections:
                 section = section.strip()
-                if section.startswith("SUMMARY:"):
+                # Handle both English and Armenian section headers
+                if (section.startswith("SUMMARY:") or section.startswith("**ԱՄՓՈՓՈՒՄ:**") or 
+                    section.startswith("ԱՄՓՈՓՈՒՄ:") or section.startswith("**SUMMARY:**")):
                     current_section = "summary"
-                    summary = section.replace("SUMMARY:", "").strip()
-                elif section.startswith("KEY POINTS:"):
+                    # Remove various header formats
+                    summary = section
+                    for header in ["SUMMARY:", "**ԱՄՓՈՓՈՒՄ:**", "ԱՄՓՈՓՈՒՄ:", "**SUMMARY:**"]:
+                        summary = summary.replace(header, "").strip()
+                elif (section.startswith("KEY POINTS:") or section.startswith("**ՀԻՄՆԱԿԱՆ ԿԵՏԵՐ:**") or 
+                        section.startswith("ՀԻՄՆԱԿԱՆ ԿԵՏԵՐ:") or section.startswith("**KEY POINTS:**")):
                     current_section = "key_points"
-                elif section.startswith("ACTIONS:"):
+                elif (section.startswith("ACTIONS:") or section.startswith("**ԳՈՐԾՈՂՈՒԹՅՈՒՆՆԵՐ:**") or 
+                        section.startswith("ԳՈՐԾՈՂՈՒԹՅՈՒՆՆԵՐ:") or section.startswith("**ACTIONS:**")):
                     current_section = "actions"
                 elif current_section == "summary" and summary:
                     summary += " " + section
@@ -379,83 +752,85 @@ ACTIONS:
                             if not action_text.lower().startswith("no specific actions"):
                                 actions.append(action_text)
 
-            result = {
-                "success": True,
-                "file_path": str(file_path),
-                "filename": filename,
-                "summary_type": summary_type,
-                "summary": summary,
-                "key_points": key_points if extract_key_points else [],
-                "actions": actions if extract_actions else [],
-                "metadata": {
-                    "original_length": len(content),
-                    "summary_length": len(summary),
-                    "compression_ratio": len(summary) / len(content) if content else 0,
-                    "key_points_count": len(key_points),
-                    "actions_count": len(actions),
-                    "file_size_bytes": file_path.stat().st_size
-                }
+        # Debug info: print parsing results
+        print(f"Final summary length: {len(summary)} characters")
+        print(f"Key points found: {len(key_points)}")
+        print(f"Actions found: {len(actions)}")
+        print(f"Summary content: {summary[:200]}...")
+
+        result = {
+            "success": True,
+            "file_path": str(file_path),
+            "filename": filename,
+            "summary_type": summary_type,
+            "summary": summary,
+            "key_points": key_points if extract_key_points else [],
+            "actions": actions if extract_actions else [],
+            "metadata": {
+                "original_length": len(content),
+                "summary_length": len(summary),
+                "compression_ratio": len(summary) / len(content) if content else 0,
+                "key_points_count": len(key_points),
+                "actions_count": len(actions),
+                "file_size_bytes": file_path.stat().st_size,
+                "language_detected": structured_result.language_detected if use_structured_output else "unknown",
+                "used_structured_output": use_structured_output
             }
-
-            try:
-                history_manager = HistoryManager()
-                summary_id = await history_manager.save_transcription_summary(
-                    filename=filename,
-                    file_path=str(file_path),
-                    summary_type=summary_type,
-                    summary=summary,
-                    key_points=key_points if extract_key_points else [],
-                    actions=actions if extract_actions else [],
-                    metadata=result["metadata"]
-                )
-                result["database_id"] = summary_id
-                result["saved_to_database"] = True
-                await history_manager.close()
-            except Exception as db_error:
-                result["database_error"] = str(db_error)
-                result["saved_to_database"] = False
-        else:
-            # For brief and detailed summaries
-            result = {
-                "success": True,
-                "file_path": str(file_path),
-                "filename": filename,
-                "summary_type": summary_type,
-                "summary": llm_output,
-                "metadata": {
-                    "original_length": len(content),
-                    "summary_length": len(llm_output),
-                    "compression_ratio": len(llm_output) / len(content) if content else 0,
-                    "file_size_bytes": file_path.stat().st_size
-                }
-            }
-
-            # Save to database
-            try:
-                history_manager = HistoryManager()
-                summary_id = await history_manager.save_transcription_summary(
-                    filename=filename,
-                    file_path=str(file_path),
-                    summary_type=summary_type,
-                    summary=llm_output,
-                    key_points=[],
-                    actions=[],
-                    metadata=result["metadata"]
-                )
-                result["database_id"] = summary_id
-                result["saved_to_database"] = True
-                await history_manager.close()
-            except Exception as db_error:
-                result["database_error"] = str(db_error)
-                result["saved_to_database"] = False
-
-        return result
-
-    except Exception as e:
-        return {
-            "success": False,
-            "error": f"Summarization failed: {str(e)}"
         }
+
+        try:
+            history_manager = HistoryManager()
+            summary_id = await history_manager.save_transcription_summary(
+                filename=filename,
+                file_path=str(file_path),
+                summary_type=summary_type,
+                summary=summary,
+                key_points=key_points if extract_key_points else [],
+                actions=actions if extract_actions else [],
+                metadata=result["metadata"]
+            )
+            result["database_id"] = summary_id
+            result["saved_to_database"] = True
+            await history_manager.close()
+        except Exception as db_error:
+            result["database_error"] = str(db_error)
+            result["saved_to_database"] = False
+    else:
+        # For brief and detailed summaries
+        result = {
+            "success": True,
+            "file_path": str(file_path),
+            "filename": filename,
+            "summary_type": summary_type,
+            "summary": llm_output,
+            "metadata": {
+                "original_length": len(content),
+                "summary_length": len(llm_output),
+                "compression_ratio": len(llm_output) / len(content) if content else 0,
+                "file_size_bytes": file_path.stat().st_size
+            }
+        }
+
+        # Save to database
+        try:
+            history_manager = HistoryManager()
+            summary_id = await history_manager.save_transcription_summary(
+                filename=filename,
+                file_path=str(file_path),
+                summary_type=summary_type,
+                summary=llm_output,
+                key_points=[],
+                actions=[],
+                metadata=result["metadata"]
+            )
+            result["database_id"] = summary_id
+            result["saved_to_database"] = True
+            await history_manager.close()
+        except Exception as db_error:
+            result["database_error"] = str(db_error)
+            result["saved_to_database"] = False
+
+    return result
 
 
 async def get_transcription_summaries_tool(
@@ -488,50 +863,124 @@ async def translate_transcription_file_tool(
     source_language: str = "auto-detect"
 ) -> Dict[str, Any]:
     """Tool for translating transcription files to target language using LLM."""
-    try:
-        transcription_paths = [
-            Path("../data/transcriptions"),  # From api directory
-            Path("data/transcriptions"),      # From project root
-            Path("/Users/sadamyan/workdir/agentic-asr/data/transcriptions"),  # Absolute path
-        ]
+    transcription_paths = [
+        Path("../data/transcriptions"),  # From api directory
+        Path("data/transcriptions"),      # From project root
+        Path("/Users/sadamyan/workdir/agentic-asr/data/transcriptions"),  # Absolute path
+    ]
+    
+    file_path = None
+    for base_path in transcription_paths:
+        # First try exact match
+        potential_path = base_path / filename
+        if potential_path.exists():
+            file_path = potential_path
+            break
         
-        file_path = None
-        for base_path in transcription_paths:
-            potential_path = base_path / filename
-            if potential_path.exists():
-                file_path = potential_path
-                break
+        # Try with different extensions if not already has one
+        for ext in ['.txt', '.json', '.md']:
+            if not filename.endswith(ext):
+                potential_path = base_path / f"{filename}{ext}"
+                if potential_path.exists():
+                    file_path = potential_path
+                    break
+        if file_path:
+            break
             
-            for ext in ['.txt', '.json', '.md']:
-                if not filename.endswith(ext):
-                    potential_path = base_path / f"{filename}{ext}"
-                    if potential_path.exists():
-                        file_path = potential_path
-                        break
-            if file_path:
-                break
-        
-        if not file_path:
-            return {
-                "success": False,
-                "error": f"Transcription file '{filename}' not found in any of the transcription directories: {[str(p) for p in transcription_paths]}"
-            }
-        
-        try:
-            with open(file_path, 'r', encoding='utf-8') as f:
-                content = f.read().strip()
-        except Exception as e:
-            return {
-                "success": False,
-                "error": f"Failed to read file: {str(e)}"
-            }
-        
-        if not content:
-            return {
-                "success": False,
-                "error": "File is empty or contains no readable content"
-            }
+        # Try fuzzy matching for common variations (spaces, case, etc.)
+        if not file_path and base_path.exists():
+            import re
+            # Create a pattern that allows for flexible matching
+            normalized_filename = re.sub(r'[^\w]', '', filename.lower())
+            for file_candidate in base_path.glob('*'):
+                if file_candidate.is_file():
+                    candidate_normalized = re.sub(r'[^\w]', '', file_candidate.stem.lower())
+                    if normalized_filename in candidate_normalized or candidate_normalized in normalized_filename:
+                        # Additional check for common patterns like "Rearrange #261" vs "Rearrange#261"
+                        if abs(len(normalized_filename) - len(candidate_normalized)) <= 2:
+                            file_path = file_candidate
+                            break
+        if file_path:
+            break
+    
+    if not file_path:
+        return {
+            "success": False,
+            "error": f"Transcription file '{filename}' not found in any of the transcription directories: {[str(p) for p in transcription_paths]}"
+        }
+    
+    try:
+        with open(file_path, 'r', encoding='utf-8') as f:
+            content = f.read().strip()
+    except Exception as e:
+        return {
+            "success": False,
+            "error": f"Failed to read file: {str(e)}"
+        }
+    
+    if not content:
+        return {
+            "success": False,
+            "error": "File is empty or contains no readable content"
+        }
 
+    # Check if content needs chunking for translation
+    estimated_tokens = len(content) // 4  # Rough estimate: 1 token ≈ 4 characters
+
+    llm_config = LLMProviderConfig(
+        provider_name="openai",
+        model="gpt-4o",
+        api_key=os.getenv("OPENAI_API_KEY"),
+        temperature=0.3
+    )
+    llm_provider = create_llm_provider(llm_config)
+
+    if estimated_tokens > 100000:  # If content is too large, chunk it
+        chunks = chunk_text(content, max_tokens=25000)  # Smaller chunks for translation
+        
+        # Translate each chunk
+        translated_chunks = []
+        for i, chunk in enumerate(chunks):
+            if source_language == "auto-detect":
+                chunk_prompt = f"""Please translate the following transcription text to {target_language}. 
+If the source text is already in {target_language}, please respond with the original text.
+Maintain the original meaning, tone, and structure as much as possible.
+
+Text to translate:
+{chunk}
+
+Please provide only the translated text without explanations."""
+            else:
+                chunk_prompt = f"""Please translate the following transcription text from {source_language} to {target_language}.
+Maintain the original meaning, tone, and structure as much as possible.
+
+Text to translate:
+{chunk}
+
+Please provide only the translated text without explanations."""
+            
+            history = History(session_id=f"translation_session_chunk_{i}")
+            user_message = Message(
+                role=RoleEnum.USER,
+                content=chunk_prompt,
+                message_type=MessageType.TEXT
+            )
+            history.add_message(user_message)
+
+            try:
+                response = await llm_provider.generate_response(history=history)
+                translated_chunks.append(response.content.strip())
+            except Exception as e:
+                return {
+                    "success": False,
+                    "error": f"Failed to translate chunk {i+1}/{len(chunks)}: {str(e)}"
+                }
+        
+        # Combine translated chunks with appropriate joining
+        translated_text = " ".join(translated_chunks)  # Use space for better flow in translations
+        
+    else:
+        # Content is small enough to process directly
         if source_language == "auto-detect":
             translation_prompt = f"""Please translate the following transcription text to {target_language}. 
 If the source text is already in {target_language}, please respond with the original text.
@@ -549,15 +998,6 @@ Text to translate:
 {content}
 
 Please provide only the translated text without explanations."""
-
-        llm_config = LLMProviderConfig(
-            provider_name="openai",
-            model="gpt-4o",
-            api_key=os.getenv("OPENAI_API_KEY"),
-            temperature=0.3
-        )
-
-        llm_provider = create_llm_provider(llm_config)
         
         history = History(session_id="translation_session")
         user_message = Message(
@@ -570,56 +1010,50 @@ Please provide only the translated text without explanations."""
         response = await llm_provider.generate_response(history=history)
         translated_text = response.content.strip()
 
-        original_length = len(content)
-        translated_length = len(translated_text)
-        
-        original_words = content.split()
-        translated_words = translated_text.split()
+    original_length = len(content)
+    translated_length = len(translated_text)
+    
+    original_words = content.split()
+    translated_words = translated_text.split()
 
-        result = {
-            "success": True,
-            "file_path": str(file_path),
-            "filename": filename,
-            "source_language": source_language,
-            "target_language": target_language,
-            "original_text": content,
-            "translated_text": translated_text,
-            "metadata": {
-                "original_length": original_length,
-                "translated_length": translated_length,
-                "original_word_count": len(original_words),
-                "translated_word_count": len(translated_words),
-                "file_size_bytes": file_path.stat().st_size,
-                "translation_ratio": translated_length / original_length if original_length > 0 else 0
-            }
+    result = {
+        "success": True,
+        "file_path": str(file_path),
+        "filename": filename,
+        "source_language": source_language,
+        "target_language": target_language,
+        "original_text": content,
+        "translated_text": translated_text,
+        "metadata": {
+            "original_length": original_length,
+            "translated_length": translated_length,
+            "original_word_count": len(original_words),
+            "translated_word_count": len(translated_words),
+            "file_size_bytes": file_path.stat().st_size,
+            "translation_ratio": translated_length / original_length if original_length > 0 else 0
         }
+    }
+    print("result", result)
 
-        try:
-            history_manager = HistoryManager()
-            translation_id = await history_manager.save_transcription_translation(
-                filename=filename,
-                file_path=str(file_path),
-                source_language=source_language,
-                target_language=target_language,
-                original_text=content,
-                translated_text=translated_text,
-                metadata=result["metadata"]
-            )
-            result["database_id"] = translation_id
-            result["saved_to_database"] = True
-            await history_manager.close()
-        except Exception as db_error:
-            result["database_error"] = str(db_error)
-            result["saved_to_database"] = False
+    try:
+        history_manager = HistoryManager()
+        translation_id = await history_manager.save_transcription_translation(
+            filename=filename,
+            file_path=str(file_path),
+            source_language=source_language,
+            target_language=target_language,
+            original_text=content,
+            translated_text=translated_text,
+            metadata=result["metadata"]
+        )
+        result["database_id"] = translation_id
+        result["saved_to_database"] = True
+        await history_manager.close()
+    except Exception as db_error:
+        result["database_error"] = str(db_error)
+        result["saved_to_database"] = False
 
-        return result
-
-    except Exception as e:
-        return {
-            "success": False,
-            "error": f"Translation failed: {str(e)}"
-        }
-
+    return result
 
 async def get_transcription_translations_tool(
     filename: str = None,

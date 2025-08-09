@@ -29,7 +29,15 @@ sys.path.append('..')
 from agentic_asr.core.agent import create_asr_agent
 from agentic_asr.core.history import HistoryManager
 from agentic_asr.core.models import LLMProviderConfig
-from agentic_asr.asr.transcriber import create_transcriber
+
+# Try to import optional transcription features
+try:
+    from agentic_asr.asr.transcriber import create_transcriber
+    TRANSCRIPTION_AVAILABLE = True
+except ImportError:
+    TRANSCRIPTION_AVAILABLE = False
+    print("Warning: Audio transcription features not available. Install audio dependencies for full functionality.")
+
 from agentic_asr.tools.enhanced import (
     analyze_transcription_tool,
     correct_transcription_tool,
@@ -265,6 +273,12 @@ async def get_transcription_names():
 @app.post("/transcriptions/upload")
 async def upload_audio_file(background_tasks: BackgroundTasks, file: UploadFile = File(...)):
     """Upload audio file for transcription."""
+    if not TRANSCRIPTION_AVAILABLE:
+        raise HTTPException(
+            status_code=503, 
+            detail="Audio transcription not available. This feature requires additional audio processing dependencies."
+        )
+    
     if not file.filename:
         raise HTTPException(status_code=400, detail="No file provided")
     
@@ -291,6 +305,9 @@ async def upload_audio_file(background_tasks: BackgroundTasks, file: UploadFile 
 
 async def transcribe_audio_file(file_path: Path, file_id: str):
     """Background task to transcribe audio file."""
+    if not TRANSCRIPTION_AVAILABLE:
+        return
+        
     try:
         transcriber = create_transcriber(model_name="base")
         result = await transcriber.transcribe_file(file_path)

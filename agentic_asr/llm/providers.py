@@ -3,7 +3,8 @@
 import json
 import logging
 from abc import ABC, abstractmethod
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Type, TypeVar
+from pydantic import BaseModel
 
 import anthropic
 import openai
@@ -14,6 +15,8 @@ from ..core.models import (
 )
 
 logger = logging.getLogger(__name__)
+
+T = TypeVar('T', bound=BaseModel)
 
 
 class LLMProvider(ABC):
@@ -28,6 +31,35 @@ class LLMProvider(ABC):
     ) -> Message:
         """Generate a response from the LLM."""
         pass
+
+    async def generate_structured_response(
+            self,
+            history: History,
+            response_format: Type[T],
+            tools: Optional[List[Dict[str, Any]]] = None,
+            settings: Optional[GenerationSettings] = None
+    ) -> Message:
+        """Generate a structured response from the LLM. Default implementation falls back to regular response."""
+        # Default implementation for providers that don't support structured output
+        regular_response = await self.generate_response(history, tools, settings)
+        
+        # Try to parse the response as JSON and convert to the desired format
+        try:
+            import json
+            content_dict = json.loads(regular_response.content)
+            structured_content = response_format(**content_dict)
+            
+            return Message(
+                role=regular_response.role,
+                content=structured_content,
+                message_type=regular_response.message_type,
+                tool_calls=regular_response.tool_calls,
+                tool_call_results=regular_response.tool_call_results
+            )
+        except (json.JSONDecodeError, TypeError, ValueError) as e:
+            logger.warning(f"Failed to parse structured response: {e}")
+            # Return the original response if parsing fails
+            return regular_response
 
 
 class OpenAIProvider(LLMProvider):
@@ -73,6 +105,53 @@ class OpenAIProvider(LLMProvider):
                 content=f"I apologize, but I encountered an error: {str(e)}",
                 message_type=MessageType.TEXT
             )
+
+    async def generate_structured_response(
+            self,
+            history: History,
+            response_format: Type[T],
+            tools: Optional[List[Dict[str, Any]]] = None,
+            settings: Optional[GenerationSettings] = None
+    ) -> Message:
+        """Generate structured response using OpenAI's response_format parameter."""
+        try:
+            messages = self._convert_history_to_openai(history)
+
+            request_params = {
+                "model": self.config.model,
+                "messages": messages,
+                "temperature": settings.temperature if settings else self.config.temperature,
+                "max_tokens": settings.max_tokens if settings and settings.max_tokens else self.config.max_tokens,
+                "top_p": settings.top_p if settings else self.config.top_p,
+                "response_format": response_format
+            }
+
+            if tools:
+                request_params["tools"] = tools
+                request_params["tool_choice"] = "auto"
+
+            response = await self.client.beta.chat.completions.parse(**request_params)
+            
+            # Extract the structured content
+            structured_content = response.choices[0].message.parsed
+            
+            # Create a custom message that stores the structured content properly
+            message = Message(
+                role=RoleEnum.ASSISTANT,
+                content=structured_content.model_dump_json() if hasattr(structured_content, 'model_dump_json') else str(structured_content),
+                message_type=MessageType.TEXT
+            )
+            
+            # Store the actual structured object as an attribute for easy access
+            message._structured_content = structured_content
+            
+            return message
+
+        except Exception as e:
+            logger.error(f"OpenAI structured API error: {e}")
+            # Fallback to regular response
+            logger.info("Falling back to regular response parsing")
+            return await super().generate_structured_response(history, response_format, tools, settings)
 
     def _convert_history_to_openai(self, history: History) -> List[Dict[str, Any]]:
         """Convert our history format to OpenAI format."""
