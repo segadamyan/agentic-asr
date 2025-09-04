@@ -30,13 +30,6 @@ from agentic_asr.core.agent import create_asr_agent
 from agentic_asr.core.history import HistoryManager
 from agentic_asr.core.models import LLMProviderConfig
 
-# Try to import optional transcription features
-try:
-    from agentic_asr.asr.transcriber import create_transcriber
-    TRANSCRIPTION_AVAILABLE = True
-except ImportError:
-    TRANSCRIPTION_AVAILABLE = False
-    print("Warning: Audio transcription features not available. Install audio dependencies for full functionality.")
 
 from agentic_asr.tools.enhanced import (
     analyze_transcription_tool,
@@ -273,54 +266,10 @@ async def get_transcription_names():
 @app.post("/transcriptions/upload")
 async def upload_audio_file(background_tasks: BackgroundTasks, file: UploadFile = File(...)):
     """Upload audio file for transcription."""
-    if not TRANSCRIPTION_AVAILABLE:
-        raise HTTPException(
-            status_code=503, 
-            detail="Audio transcription not available. This feature requires additional audio processing dependencies."
-        )
-    
-    if not file.filename:
-        raise HTTPException(status_code=400, detail="No file provided")
-    
-    # Save uploaded file
-    file_id = str(uuid4())
-    file_extension = Path(file.filename).suffix
-    saved_path = UPLOADS_DIR / f"{file_id}{file_extension}"
-    
-    try:
-        content = await file.read()
-        saved_path.write_bytes(content)
-        
-        # Add transcription task to background
-        background_tasks.add_task(transcribe_audio_file, saved_path, file_id)
-        
-        return {
-            "file_id": file_id,
-            "filename": file.filename,
-            "message": "File uploaded successfully. Transcription started.",
-            "status": "processing"
-        }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error uploading file: {str(e)}")
-
-async def transcribe_audio_file(file_path: Path, file_id: str):
-    """Background task to transcribe audio file."""
-    if not TRANSCRIPTION_AVAILABLE:
-        return
-        
-    try:
-        transcriber = create_transcriber(model_name="base")
-        result = await transcriber.transcribe_file(file_path)
-        
-        # Save transcription
-        output_path = TRANSCRIPTIONS_DIR / f"{file_id}.txt"
-        output_path.write_text(result.text, encoding='utf-8')
-        
-        # Clean up uploaded file
-        file_path.unlink()
-        
-    except Exception as e:
-        print(f"Transcription error for {file_id}: {e}")
+    raise HTTPException(
+        status_code=503, 
+        detail="Audio transcription disabled for lightweight deployment. Core chat and analysis features are available."
+    )
 
 # Analysis endpoints
 @app.post("/analyze")
