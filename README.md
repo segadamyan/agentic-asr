@@ -1,39 +1,24 @@
 # Agentic ASR
 
-Automatic Speech Recognition with LLM-powered agents for intelligent audio processing.
+Intelligent content processing system with LLM-powered agents for transcribed speech analysis.
 
 ## Features
 
-- **Speech Recognition**: High-quality transcription using OpenAI Whisper
+- **Transcription Analysis**: Intelligent processing of transcribed text content
 - **LLM Integration**: Support for OpenAI GPT and Anthropic Claude models
 - **Intelligent Processing**: AI-powered analysis, summarization, and keyword extraction
 - **Conversation History**: Persistent storage of interactions and context
 - **Tool Integration**: Extensible tool system for custom processing
 - **CLI Interface**: Easy-to-use command-line tools
 - **Session Management**: Continue conversations across sessions
+- **RAG Support**: Semantic search and retrieval-augmented generation
+- **Vector Store**: Built-in FAISS-based vector storage for semantic search
 
 ## Installation
 
 ### Prerequisites
 
 - Python 3.8 or higher
-- FFmpeg (for audio processing)
-
-### Install FFmpeg
-
-**macOS (using Homebrew):**
-```bash
-brew install ffmpeg
-```
-
-**Ubuntu/Debian:**
-```bash
-sudo apt update
-sudo apt install ffmpeg
-```
-
-**Windows:**
-Download from [FFmpeg official site](https://ffmpeg.org/download.html)
 
 ### Install Agentic ASR
 
@@ -58,10 +43,6 @@ ANTHROPIC_API_KEY=your_anthropic_api_key_here
 # Database
 DATABASE_URL=sqlite+aiosqlite:///./data/agentic_asr.db
 
-# Whisper Configuration
-WHISPER_MODEL=base
-WHISPER_DEVICE=auto
-
 # Default LLM Configuration
 DEFAULT_LLM_PROVIDER=openai
 DEFAULT_LLM_MODEL=gpt-4
@@ -69,16 +50,16 @@ DEFAULT_LLM_MODEL=gpt-4
 
 ## Quick Start
 
-### 1. Transcribe Audio
+### 1. Analyze Transcriptions
 
 ```bash
-# Basic transcription
-agentic-asr transcribe audio.wav
+# Analyze transcription files
+agentic-asr analyze transcription.txt
 
-# Specify model and language
-agentic-asr transcribe audio.wav --model small --language en
+# Summarize content
+agentic-asr summarize transcription.txt
 
-# Save to file
+# Extract insights
 agentic-asr transcribe audio.wav --output transcription.txt
 ```
 
@@ -96,13 +77,27 @@ agentic-asr chat --provider anthropic --model claude-3-sonnet-20240229
 ```
 
 ### 3. Process Audio with AI
+agentic-asr extract-keywords transcription.txt
+```
+
+### 2. Interactive Sessions
 
 ```bash
-# Transcribe and ask questions
-agentic-asr process audio.wav "What are the main topics discussed?"
+# Start interactive session
+agentic-asr chat
+
+# Use with specific LLM provider
+agentic-asr chat --provider openai --model gpt-4
+```
+
+### 3. Process with Context
+
+```bash
+# Analyze transcriptions with questions
+agentic-asr process transcription.txt "What are the main topics discussed?"
 
 # Analyze and summarize
-agentic-asr process audio.wav "Summarize this audio in bullet points"
+agentic-asr process transcription.txt "Summarize this content in bullet points"
 ```
 
 ### 4. Manage Sessions
@@ -116,23 +111,6 @@ agentic-asr version
 ```
 
 ## Python API Usage
-
-### Basic Transcription
-
-```python
-import asyncio
-from agentic_asr.asr.transcriber import create_transcriber
-
-async def transcribe_audio():
-    transcriber = create_transcriber(model_name="base")
-    result = await transcriber.transcribe_file("audio.wav")
-    
-    print(f"Text: {result.text}")
-    print(f"Language: {result.language}")
-    print(f"Confidence: {result.confidence}")
-
-asyncio.run(transcribe_audio())
-```
 
 ### Agent Interaction
 
@@ -185,13 +163,13 @@ The system is built with a modular architecture:
     ┌────────────────────────────┼────────────────────────────┐
     │                            │                            │
 ┌───▼───┐              ┌────────▼────────┐          ┌───────▼───────┐
-│  ASR  │              │  LLM Providers  │          │     Tools     │
-│Module │              │                 │          │               │
+│Vector │              │  LLM Providers  │          │     Tools     │
+│Store  │              │                 │          │               │
 ├───────┤              ├─────────────────┤          ├───────────────┤
-│Whisper│              │ OpenAI GPT      │          │ Transcription │
-│Models │              │ Anthropic Claude│          │ Summarization │
-└───────┘              └─────────────────┘          │ Keywords      │
-                                                    │ Custom Tools  │
+│FAISS  │              │ OpenAI GPT      │          │ Text Analysis │
+│Search │              │ Anthropic Claude│          │ Summarization │
+└───────┘              └─────────────────┘          │ Translation   │
+                                                    │ RAG Search    │
                                                     └───────────────┘
 ```
 
@@ -199,7 +177,7 @@ The system is built with a modular architecture:
 
 The agent comes with built-in tools:
 
-- **transcribe_audio**: Convert audio files to text
+- **analyze_transcription**: Analyze transcribed text content
 - **summarize_text**: Generate summaries of transcribed content
 - **extract_keywords**: Extract key terms and phrases
 - **Custom tools**: Extend with your own processing functions

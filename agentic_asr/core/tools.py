@@ -122,15 +122,6 @@ class ToolExecutor:
         return result
 
 
-async def transcribe_audio_tool(file_path: str, language: str = "auto") -> Dict[str, Any]:
-    """Tool for transcribing audio files."""
-    # Integrate with the ASR system
-    return {
-        "status": "not_implemented",
-        "message": f"Would transcribe {file_path} in language {language}"
-    }
-
-
 async def summarize_text_tool(text: str, max_length: int = 200) -> Dict[str, Any]:
     """Tool for summarizing transcribed text."""
     sentences = text.split('. ')
@@ -166,21 +157,8 @@ async def extract_keywords_tool(text: str, max_keywords: int = 10) -> Dict[str, 
 
 
 def get_default_tools() -> List[ToolDefinition]:
-    """Get default tools for ASR processing."""
+    """Get default tools for content processing."""
     return [
-        ToolDefinition(
-            name="transcribe_audio",
-            description="Transcribe an audio file to text",
-            parameters={
-                "type": "object",
-                "properties": {
-                    "file_path": {"type": "string", "description": "Path to the audio file"},
-                    "language": {"type": "string", "description": "Language code for transcription", "default": "auto"}
-                },
-                "required": ["file_path"]
-            },
-            function=transcribe_audio_tool
-        ),
         ToolDefinition(
             name="summarize_text",
             description="Summarize transcribed text",
