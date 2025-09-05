@@ -60,6 +60,11 @@ def get_file_logger() -> logging.Logger:
     return logging.getLogger("agentic_asr.file")
 
 
+def get_tool_logger() -> logging.Logger:
+    """Get tool logger for tool execution logging."""
+    return logging.getLogger("agentic_asr.tools")
+
+
 log_level = os.getenv("LOG_LEVEL", "INFO")
 log_file = os.getenv("LOG_FILE", "./logs/agentic_asr.log")
 
