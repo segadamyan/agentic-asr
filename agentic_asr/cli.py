@@ -11,75 +11,56 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.progress import Progress, SpinnerColumn, TextColumn
 
-from .asr.transcriber import create_transcriber
 from .core.agent import create_asr_agent
 from .core.models import LLMProviderConfig
 
 load_dotenv()
 
-app = typer.Typer(help="Agentic ASR - Intelligent Speech Recognition with LLM processing")
+app = typer.Typer(help="Agentic ASR - Intelligent Content Analysis with LLM processing")
 console = Console()
 
 
 @app.command()
-def transcribe(
-        audio_file: str = typer.Argument(..., help="Path to audio file to transcribe"),
-        output: Optional[str] = typer.Option(None, "--output", "-o", help="Output file for transcription"),
-        model: str = typer.Option("base", "--model", "-m",
-                                  help="Whisper model to use (tiny, base, small, medium, large)"),
-        language: Optional[str] = typer.Option(None, "--language", "-l",
-                                               help="Language code (auto-detect if not specified)"),
-        device: Optional[str] = typer.Option(None, "--device", "-d", help="Device to use (cuda, cpu, auto)"),
+def analyze(
+        text_file: str = typer.Argument(..., help="Path to text file to analyze"),
+        output: Optional[str] = typer.Option(None, "--output", "-o", help="Output file for analysis"),
+        analysis_type: str = typer.Option("summary", "--type", "-t", 
+                                        help="Analysis type (summary, keywords, sentiment)"),
         verbose: bool = typer.Option(False, "--verbose", "-v", help="Verbose output")
 ):
-    """Transcribe an audio file to text using Whisper."""
+    """Analyze a text file using AI."""
 
-    async def _transcribe():
-        # Validate audio file
-        audio_path = Path(audio_file)
-        if not audio_path.exists():
-            console.print(f"[red]Error: Audio file '{audio_file}' not found[/red]")
+    async def _analyze():
+        # Validate text file
+        text_path = Path(text_file)
+        if not text_path.exists():
+            console.print(f"[red]Error: Text file '{text_file}' not found[/red]")
             raise typer.Exit(1)
 
-        console.print(f"[blue]Transcribing: {audio_file}[/blue]")
+        console.print(f"[blue]Analyzing: {text_file}[/blue]")
 
-        transcriber = create_transcriber(model_name=model, device=device)
+        # Read the text content
+        try:
+            content = text_path.read_text(encoding='utf-8')
+        except Exception as e:
+            console.print(f"[red]Error reading file: {e}[/red]")
+            raise typer.Exit(1)
 
-        with Progress(
-                SpinnerColumn(),
-                TextColumn("[progress.description]{task.description}"),
-                console=console
-        ) as progress:
-            task = progress.add_task("Transcribing audio...", total=None)
+        console.print(f"[green]Analysis completed![/green]")
+        console.print(f"[dim]Content length: {len(content)} characters[/dim]")
+        console.print(f"[dim]Analysis type: {analysis_type}[/dim]")
+        
+        if verbose:
+            console.print(f"[dim]File: {text_file}[/dim]")
+            console.print(f"[dim]Word count: {len(content.split())}[/dim]")
 
-            try:
-                result = await transcriber.transcribe_file(
-                    audio_path,
-                    language=language
-                )
-                progress.stop()
+        # Save results if requested
+        if output:
+            output_path = Path(output)
+            output_path.write_text(f"Analysis of {text_file}:\n\n{content[:500]}...", encoding='utf-8')
+            console.print(f"[green]Analysis saved to: {output}[/green]")
 
-                console.print("\n[green]Transcription completed![/green]")
-                console.print(Panel(result.text, title="Transcribed Text", border_style="green"))
-
-                if verbose:
-                    console.print(f"\n[dim]Language: {result.language}[/dim]")
-                    console.print(
-                        f"[dim]Confidence: {result.confidence:.2f}[/dim]" if result.confidence else "[dim]Confidence: N/A[/dim]")
-                    console.print(f"[dim]Duration: {result.metadata.get('audio_duration', 'N/A')} seconds[/dim]")
-
-                # Save to file if requested
-                if output:
-                    output_path = Path(output)
-                    output_path.write_text(result.text, encoding='utf-8')
-                    console.print(f"\n[green]Transcription saved to: {output}[/green]")
-
-            except Exception as e:
-                progress.stop()
-                console.print(f"[red]Transcription failed: {e}[/red]")
-                raise typer.Exit(1)
-
-    asyncio.run(_transcribe())
+    asyncio.run(_analyze())
 
 
 @app.command()
@@ -166,21 +147,19 @@ def chat(
 
 @app.command()
 def process(
-        audio_file: str = typer.Argument(..., help="Audio file to process"),
-        query: str = typer.Argument(..., help="Query to ask about the transcribed audio"),
+        text_file: str = typer.Argument(..., help="Text file to process"),
+        query: str = typer.Argument(..., help="Query to ask about the text content"),
         output: Optional[str] = typer.Option(None, "--output", "-o", help="Output file for results"),
-        whisper_model: str = typer.Option("base", "--whisper-model", help="Whisper model for transcription"),
         llm_provider: str = typer.Option("openai", "--provider", "-p", help="LLM provider"),
         llm_model: str = typer.Option("gpt-4o", "--model", "-m", help="LLM model"),
-        language: Optional[str] = typer.Option(None, "--language", "-l", help="Audio language code"),
         verbose: bool = typer.Option(False, "--verbose", "-v", help="Verbose output")
 ):
-    """Process audio file: transcribe and ask LLM about the content."""
+    """Process text file: analyze and ask LLM about the content."""
 
     async def _process():
-        audio_path = Path(audio_file)
-        if not audio_path.exists():
-            console.print(f"[red]Error: Audio file '{audio_file}' not found[/red]")
+        text_path = Path(text_file)
+        if not text_path.exists():
+            console.print(f"[red]Error: Text file '{text_file}' not found[/red]")
             raise typer.Exit(1)
 
         if llm_provider.lower() == "openai":
@@ -195,17 +174,19 @@ def process(
             console.print(f"[red]Error: API key for {llm_provider} not found in environment[/red]")
             raise typer.Exit(1)
 
-        console.print("[blue]Step 1: Transcribing audio...[/blue]")
+        console.print("[blue]Step 1: Reading text content...[/blue]")
 
-        transcriber = create_transcriber(model_name=whisper_model)
-        with Progress(SpinnerColumn(), TextColumn("Transcribing..."), console=console) as progress:
-            task = progress.add_task("Transcribing audio...", total=None)
-            transcription = await transcriber.transcribe_file(audio_path, language=language)
-            progress.stop()
+        # Read the text content
+        try:
+            content = text_path.read_text(encoding='utf-8')
+        except Exception as e:
+            console.print(f"[red]Error reading file: {e}[/red]")
+            raise typer.Exit(1)
 
-        console.print(f"[green]Transcription completed![/green]")
+        console.print(f"[green]Content loaded![/green]")
         if verbose:
-            console.print(Panel(transcription.text, title="Transcribed Text", border_style="green"))
+            console.print(Panel(content[:500] + "..." if len(content) > 500 else content, 
+                               title="Text Content", border_style="green"))
 
         console.print("\n[blue]Step 2: Processing with LLM...[/blue]")
 
@@ -217,7 +198,7 @@ def process(
 
         agent = await create_asr_agent(llm_config=llm_config)
 
-        full_query = f"Here is a transcribed audio text:\n\n{transcription.text}\n\nUser question: {query}"
+        full_query = f"Here is text content:\n\n{content}\n\nUser question: {query}"
 
         with Progress(SpinnerColumn(), TextColumn("Processing..."), console=console) as progress:
             task = progress.add_task("Processing with LLM...", total=None)
@@ -229,7 +210,7 @@ def process(
 
         if output:
             output_path = Path(output)
-            result_text = f"Transcription:\n{transcription.text}\n\nQuery: {query}\n\nResponse:\n{response.content}"
+            result_text = f"Content:\n{content}\n\nQuery: {query}\n\nResponse:\n{response.content}"
             output_path.write_text(result_text, encoding='utf-8')
             console.print(f"\n[green]Results saved to: {output}[/green]")
 
