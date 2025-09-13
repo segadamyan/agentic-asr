@@ -72,7 +72,6 @@ def log_tool_call(tool_name: str):
         return wrapper
     return decorator
 
-
 # Pydantic models for structured outputs
 class TranscriptionSummary(BaseModel):
     """Structured output model for transcription summarization."""
@@ -194,6 +193,22 @@ async def correct_transcription_tool(
 ) -> Dict[str, Any]:
     """Tool for correcting transcription errors using LLM intelligence."""
     try:
+        # Check if the input text contains error messages from previous failed attempts
+        error_indicators = [
+            "I'm sorry, but the text you provided is too lengthy",
+            "I'm sorry, but I can't assist with that request",
+            "Could you please provide a shorter segment",
+            "text too lengthy for me to process"
+        ]
+        
+        if any(indicator in original_text for indicator in error_indicators):
+            return {
+                "success": False,
+                "error": "Input text appears to contain error messages from previous failed processing attempts. Please use the original transcription text instead.",
+                "original_text": original_text,
+                "suggestion": "Use the original transcription file without .corrected extensions"
+            }
+        
         correction_prompts = {
             "light": """Please review and lightly correct any obvious transcription errors in the following text. 
 Focus only on clear spelling mistakes, missing punctuation, and obvious word recognition errors. 
@@ -242,11 +257,11 @@ Please provide only the corrected text without explanations, maintaining the sam
         # Create LLM provider
         llm_provider = create_llm_provider(llm_config)
 
-        # Check if content needs chunking for correction
+        # Check if content needs chunking for correction (very conservative threshold)
         estimated_tokens = len(original_text) // 4  # Rough estimate: 1 token ≈ 4 characters
 
-        if estimated_tokens > 100000:  # If content is too large, chunk it
-            chunks = chunk_text(original_text, max_tokens=25000)  # Smaller chunks for correction
+        if estimated_tokens > 2000:  # Ultra-aggressive threshold - chunk anything over 2k tokens (8k chars)
+            chunks = chunk_text(original_text, max_tokens=1500)  # Ultra-small chunks for maximum reliability
             
             # Correct each chunk
             corrected_chunks = []
@@ -611,8 +626,8 @@ Ensure all text content (summary, key points, actions) is in the same language a
     # For comprehensive summaries, we'll use structured outputs
     use_structured_output = (summary_type == "comprehensive")
 
-    if estimated_tokens > 100000:  # If content is too large, chunk it
-        chunks = chunk_text(content, max_tokens=25000)  # Slightly smaller chunks for better processing
+    if estimated_tokens > 10000:  # If content is too large, chunk it (conservative threshold for summaries)
+        chunks = chunk_text(content, max_tokens=8000)  # Smaller, safer chunks for better processing
         
         print(f"Content is large ({estimated_tokens} estimated tokens), splitting into {len(chunks)} chunks")
         
@@ -990,6 +1005,21 @@ async def translate_transcription_file_tool(
             "error": "File is empty or contains no readable content"
         }
 
+    # Check if the content contains error messages from previous failed attempts
+    error_indicators = [
+        "I'm sorry, but the text you provided is too lengthy",
+        "I'm sorry, but I can't assist with that request", 
+        "Could you please provide a shorter segment",
+        "text too lengthy for me to process"
+    ]
+    
+    if any(indicator in content for indicator in error_indicators):
+        return {
+            "success": False,
+            "error": "File appears to contain error messages from previous failed processing attempts. Please use the original transcription file instead.",
+            "suggestion": "Use the original transcription file without .corrected or .english extensions"
+        }
+
     # Check if content needs chunking for translation
     estimated_tokens = len(content) // 4  # Rough estimate: 1 token ≈ 4 characters
 
@@ -1001,24 +1031,35 @@ async def translate_transcription_file_tool(
     )
     llm_provider = create_llm_provider(llm_config)
 
-    if estimated_tokens > 100000:  # If content is too large, chunk it
-        chunks = chunk_text(content, max_tokens=25000)  # Smaller chunks for translation
+    if estimated_tokens > 2000:  # Ultra-aggressive threshold - chunk anything over 2k tokens (8k chars)
+        chunks = chunk_text(content, max_tokens=1500)  # Ultra-small chunks for maximum reliability
         
         # Translate each chunk
         translated_chunks = []
         for i, chunk in enumerate(chunks):
             if source_language == "auto-detect":
-                chunk_prompt = f"""Please translate the following transcription text to {target_language}. 
-If the source text is already in {target_language}, please respond with the original text.
-Maintain the original meaning, tone, and structure as much as possible.
+                chunk_prompt = f"""You are a professional translator. Please translate this Armenian transcription text to {target_language}. 
+
+IMPORTANT INSTRUCTIONS:
+- This is a segment from a larger transcription, so focus only on this chunk
+- Translate the text even if it seems fragmented or part of a larger conversation
+- Do not refuse to translate due to length - this is already a small chunk
+- Maintain the conversational tone and meaning
+- Provide only the translation, no explanations
 
 Text to translate:
 {chunk}
 
-Please provide only the translated text without explanations."""
+Translation:"""
             else:
-                chunk_prompt = f"""Please translate the following transcription text from {source_language} to {target_language}.
-Maintain the original meaning, tone, and structure as much as possible.
+                chunk_prompt = f"""You are a professional translator. Please translate this text from {source_language} to {target_language}.
+
+IMPORTANT INSTRUCTIONS:
+- This is a segment from a larger transcription, so focus only on this chunk
+- Translate the text even if it seems fragmented or part of a larger conversation
+- Do not refuse to translate due to length - this is already a small chunk
+- Maintain the conversational tone and meaning
+- Provide only the translation, no explanations
 
 Text to translate:
 {chunk}
@@ -1048,14 +1089,18 @@ Please provide only the translated text without explanations."""
     else:
         # Content is small enough to process directly
         if source_language == "auto-detect":
-            translation_prompt = f"""Please translate the following transcription text to {target_language}. 
-If the source text is already in {target_language}, please respond with the original text.
-Maintain the original meaning, tone, and structure as much as possible.
+            translation_prompt = f"""You are a professional translator. Please translate this transcription text to {target_language}.
+
+IMPORTANT INSTRUCTIONS:
+- Translate the text even if it seems long or complex
+- Do not refuse to translate - provide the best translation you can
+- Maintain the conversational tone and meaning
+- Provide only the translation, no explanations
 
 Text to translate:
 {content}
 
-Please provide only the translated text without explanations."""
+Translation:"""
         else:
             translation_prompt = f"""Please translate the following transcription text from {source_language} to {target_language}.
 Maintain the original meaning, tone, and structure as much as possible.
