@@ -1,14 +1,16 @@
 """Integration with the transcriber to create a real transcription tool."""
 import os
+import asyncio
+import re
+import time
+import logging
 from pathlib import Path
 from typing import Dict, Any, List, Optional
 from pydantic import BaseModel
 import json
-import os
-import re
-import time
-import logging
+import tiktoken
 
+from ..config import Config
 from ..core.history import HistoryManager
 from ..core.models import ToolDefinition, LLMProviderConfig, History, Message, RoleEnum, MessageType
 from ..llm.providers import create_llm_provider
@@ -16,6 +18,77 @@ from ..utils.logging import logger
 
 # Tool-specific logger
 tool_logger = logging.getLogger("agentic_asr.tools")
+
+
+def count_tokens(text: str, model: str = "gpt-4") -> int:
+    """
+    Count tokens accurately using tiktoken.
+    
+    Args:
+        text: Text to count tokens for
+        model: Model name for tiktoken encoding (default: gpt-4)
+    
+    Returns:
+        Number of tokens
+    """
+    try:
+        enc = tiktoken.encoding_for_model(model)
+    except KeyError:
+        enc = tiktoken.get_encoding("cl100k_base")
+    
+    return len(enc.encode(text))
+
+
+def find_transcription_file(filename: str) -> Optional[Path]:
+    """
+    Find a transcription file using robust path matching.
+    
+    Args:
+        filename: Name of the transcription file to find
+        
+    Returns:
+        Path to the file if found, None otherwise
+    """
+    transcription_paths = Config.get_transcription_paths()
+    
+    for base_path in transcription_paths:
+        # First try exact match
+        potential_path = base_path / filename
+        if potential_path.exists():
+            return potential_path
+        
+        # Try with different extensions if not already has one
+        for ext in ['.txt', '.json', '.md']:
+            if not filename.endswith(ext):
+                potential_path = base_path / f"{filename}{ext}"
+                if potential_path.exists():
+                    return potential_path
+                
+        # Try fuzzy matching for common variations (spaces, case, etc.)
+        if base_path.exists():
+            # Create a pattern that allows for flexible matching
+            normalized_filename = re.sub(r'[^\w]', '', filename.lower())
+            for file_candidate in base_path.glob('*'):
+                if file_candidate.is_file():
+                    candidate_normalized = re.sub(r'[^\w]', '', file_candidate.stem.lower())
+                    if normalized_filename in candidate_normalized or candidate_normalized in normalized_filename:
+                        # Additional check for common patterns like "Rearrange #261" vs "Rearrange#261"
+                        if abs(len(normalized_filename) - len(candidate_normalized)) <= 2:
+                            return file_candidate
+    
+    return None
+
+
+def create_default_llm_config() -> LLMProviderConfig:
+    """Create LLM configuration using config defaults."""
+    api_key = Config.OPENAI_API_KEY if Config.DEFAULT_LLM_PROVIDER == "openai" else Config.ANTHROPIC_API_KEY
+    
+    return LLMProviderConfig(
+        provider_name=Config.DEFAULT_LLM_PROVIDER,
+        model=Config.DEFAULT_LLM_MODEL,
+        api_key=api_key,
+        temperature=Config.DEFAULT_LLM_TEMPERATURE
+    )
 
 
 def log_tool_call(tool_name: str):
@@ -247,25 +320,27 @@ Please provide only the corrected text without explanations, maintaining the sam
 
         context_section = f"\nContext: {context}" if context else ""
 
+        # Create LLM provider with config defaults
         llm_config = LLMProviderConfig(
-            provider_name="openai",
-            model="gpt-4o",
-            api_key=os.getenv("OPENAI_API_KEY"),
-            temperature=0.3
+            provider_name=Config.DEFAULT_LLM_PROVIDER,
+            model=Config.DEFAULT_LLM_MODEL,
+            api_key=Config.OPENAI_API_KEY if Config.DEFAULT_LLM_PROVIDER == "openai" else Config.ANTHROPIC_API_KEY,
+            temperature=Config.DEFAULT_LLM_TEMPERATURE
         )
 
         # Create LLM provider
         llm_provider = create_llm_provider(llm_config)
 
         # Check if content needs chunking for correction (very conservative threshold)
-        estimated_tokens = len(original_text) // 4  # Rough estimate: 1 token ≈ 4 characters
+        estimated_tokens = count_tokens(original_text)
 
-        if estimated_tokens > 2000:  # Ultra-aggressive threshold - chunk anything over 2k tokens (8k chars)
-            chunks = chunk_text(original_text, max_tokens=1500)  # Ultra-small chunks for maximum reliability
+        if estimated_tokens > Config.CORRECTION_MAX_TOKENS:  # Ultra-aggressive threshold - chunk anything over configured limit
+            chunks = chunk_text(original_text, max_tokens=Config.CORRECTION_CHUNK_TOKENS)  # Ultra-small chunks for maximum reliability
             
-            # Correct each chunk
-            corrected_chunks = []
-            for i, chunk in enumerate(chunks):
+            logger.warning(f"Processing {len(chunks)} chunks in parallel for correction")
+            
+            async def correct_single_chunk(chunk_data):
+                i, chunk = chunk_data
                 chunk_prompt = correction_prompts[correction_level].format(
                     text=chunk,
                     context_section=context_section
@@ -278,18 +353,63 @@ Please provide only the corrected text without explanations, maintaining the sam
                     message_type=MessageType.TEXT
                 )
                 history.add_message(user_message)
-
+                
                 try:
                     response = await llm_provider.generate_response(history=history)
-                    corrected_chunks.append(response.content.strip())
+                    return {
+                        "index": i,
+                        "success": True,
+                        "corrected_text": response.content.strip(),
+                        "original_length": len(chunk),
+                        "corrected_length": len(response.content.strip())
+                    }
                 except Exception as e:
                     return {
+                        "index": i,
                         "success": False,
-                        "error": f"Failed to correct chunk {i+1}/{len(chunks)}: {str(e)}"
+                        "error": str(e),
+                        "original_length": len(chunk)
                     }
             
-            # Combine corrected chunks with better joining
-            corrected_text = " ".join(corrected_chunks)  # Use space instead of double newlines for corrections
+            chunk_tasks = [correct_single_chunk((i, chunk)) for i, chunk in enumerate(chunks)]
+            
+            try:
+                correction_results = await asyncio.gather(*chunk_tasks, return_exceptions=True)
+                
+                corrected_chunks = [None] * len(chunks)  # Initialize with None to maintain order
+                failed_chunks = []
+                
+                for result in correction_results:
+                    if isinstance(result, Exception):
+                        failed_chunks.append(f"Exception: {str(result)}")
+                    elif not result.get("success"):
+                        failed_chunks.append(f"Chunk {result.get('index', 'unknown')}: {result.get('error', 'Unknown error')}")
+                    else:
+                        corrected_chunks[result["index"]] = result["corrected_text"]
+                        logger.debug(f"✅ Chunk {result['index'] + 1}/{len(chunks)} corrected successfully ({result['original_length']} -> {result['corrected_length']} chars)")
+                
+                if failed_chunks:
+                    return {
+                        "success": False,
+                        "error": f"Failed to correct {len(failed_chunks)}/{len(chunks)} chunks: {'; '.join(failed_chunks[:3])}{'...' if len(failed_chunks) > 3 else ''}"
+                    }
+                
+                if any(chunk is None for chunk in corrected_chunks):
+                    missing_indices = [i for i, chunk in enumerate(corrected_chunks) if chunk is None]
+                    return {
+                        "success": False,
+                        "error": f"Missing corrections for chunks: {missing_indices}"
+                    }
+                
+                # Combine corrected chunks with better joining
+                corrected_text = " ".join(corrected_chunks)
+                logger.info(f"✅ Successfully corrected all {len(chunks)} chunks in parallel")
+                
+            except Exception as e:
+                return {
+                    "success": False,
+                    "error": f"Parallel correction failed: {str(e)}"
+                }
         else:
             # Content is small enough to process directly
             prompt = correction_prompts[correction_level].format(
@@ -345,154 +465,79 @@ Please provide only the corrected text without explanations, maintaining the sam
         }
 
 
-def chunk_text(text: str, max_tokens: int = 30000) -> list[str]:
+def chunk_text(text: str, max_tokens: int = 30000, model: str = "gpt-4") -> List[str]:
     """
-    Split text into chunks that fit within token limits.
-    Uses approximate token counting (1 token ≈ 4 characters for safety).
-    Handles various text formats including single-line transcriptions.
-    """
-    # Approximate max characters per chunk (conservative estimate)
-    max_chars = max_tokens * 3  # Being conservative with token estimation
+    Split text into chunks that fit within token limits using tiktoken for accurate counting.
     
-    if len(text) <= max_chars:
+    Args:
+        text: Text to chunk
+        max_tokens: Maximum tokens per chunk
+        model: Model name for tiktoken encoding (default: gpt-4)
+    
+    Returns:
+        List of text chunks
+    """
+    try:
+        # Get the encoding for the specified model
+        enc = tiktoken.encoding_for_model(model)
+    except KeyError:
+        # Fallback to cl100k_base encoding if model not found
+        enc = tiktoken.get_encoding("cl100k_base")
+    
+    # If the entire text fits in one chunk, return it
+    tokens = enc.encode(text)
+    if len(tokens) <= max_tokens:
         return [text]
     
     chunks = []
-    current_chunk = ""
+    current_chunk_tokens = []
     
-    # Strategy 1: Try splitting by double newlines (paragraphs)
-    paragraphs = text.split('\n\n')
+    # Split by sentences first (handles multiple languages including Armenian)
+    sentences = re.split(r'(?<=[.!?։])\s+', text)  # Added Armenian period ։
     
-    # If we have meaningful paragraphs (more than 1 and not just the whole text)
-    if len(paragraphs) > 1 and len(paragraphs[0]) < len(text) * 0.9:
-        for paragraph in paragraphs:
-            if len(current_chunk) + len(paragraph) + 2 > max_chars:
-                if current_chunk.strip():
-                    chunks.append(current_chunk.strip())
-                    current_chunk = paragraph
-                else:
-                    # Single paragraph is too long, need to split it further
-                    para_chunks = _split_large_text(paragraph, max_chars)
-                    chunks.extend(para_chunks)
-                    current_chunk = ""
-            else:
-                current_chunk += "\n\n" + paragraph if current_chunk else paragraph
-    else:
-        # Strategy 2: Single line or no meaningful paragraphs - split by other methods
-        current_chunk = text
-    
-    # If we still have a large chunk, split it
-    if current_chunk and len(current_chunk) > max_chars:
-        final_chunks = _split_large_text(current_chunk, max_chars)
-        chunks.extend(final_chunks)
-    elif current_chunk.strip():
-        chunks.append(current_chunk.strip())
-    
-    return chunks
-
-
-def _split_large_text(text: str, max_chars: int) -> list[str]:
-    """
-    Helper function to split large text using multiple strategies.
-    """
-    chunks = []
-    current_chunk = ""
-    
-    # Strategy 1: Split by sentences (periods followed by space and capital letter or end)
-    import re
-    sentences = re.split(r'(?<=[.!?])\s+(?=[A-ZԱ-Ֆա-և])', text)
-    
-    if len(sentences) > 1:
-        for sentence in sentences:
-            if len(current_chunk) + len(sentence) + 1 > max_chars:
-                if current_chunk.strip():
-                    chunks.append(current_chunk.strip())
-                    current_chunk = sentence
-                else:
-                    # Single sentence is too long, split by other methods
-                    sentence_chunks = _split_by_punctuation(sentence, max_chars)
-                    chunks.extend(sentence_chunks)
-                    current_chunk = ""
-            else:
-                current_chunk += " " + sentence if current_chunk else sentence
-    else:
-        # Strategy 2: If no sentences, split by other punctuation
-        current_chunk = text
-    
-    # If we still have a large chunk, split by punctuation
-    if current_chunk and len(current_chunk) > max_chars:
-        punct_chunks = _split_by_punctuation(current_chunk, max_chars)
-        chunks.extend(punct_chunks)
-    elif current_chunk.strip():
-        chunks.append(current_chunk.strip())
-    
-    return chunks
-
-
-def _split_by_punctuation(text: str, max_chars: int) -> list[str]:
-    """
-    Split text by various punctuation marks when sentences don't work.
-    """
-    chunks = []
-    current_chunk = ""
-    
-    # Split by commas, semicolons, colons, and other punctuation
-    import re
-    segments = re.split(r'([,;:])\s*', text)
-    
-    if len(segments) > 1:
-        for i in range(0, len(segments), 2):
-            segment = segments[i]
-            punct = segments[i + 1] if i + 1 < len(segments) else ""
-            full_segment = segment + punct
+    for sentence in sentences:
+        sentence_tokens = enc.encode(sentence)
+        
+        # If adding this sentence would exceed the limit
+        if len(current_chunk_tokens) + len(sentence_tokens) > max_tokens:
+            # Save current chunk if it has content
+            if current_chunk_tokens:
+                chunk_text = enc.decode(current_chunk_tokens)
+                chunks.append(chunk_text.strip())
+                current_chunk_tokens = []
             
-            if len(current_chunk) + len(full_segment) > max_chars:
-                if current_chunk.strip():
-                    chunks.append(current_chunk.strip())
-                    current_chunk = full_segment
-                else:
-                    # Even single segment is too long, split by words
-                    word_chunks = _split_by_words(full_segment, max_chars)
-                    chunks.extend(word_chunks)
-                    current_chunk = ""
+            # If single sentence is too long, split it by words
+            if len(sentence_tokens) > max_tokens:
+                words = sentence.split()
+                current_word_tokens = []
+                
+                for word in words:
+                    word_tokens = enc.encode(word + " ")  # Include space
+                    
+                    if len(current_word_tokens) + len(word_tokens) > max_tokens:
+                        if current_word_tokens:
+                            chunk_text = enc.decode(current_word_tokens)
+                            chunks.append(chunk_text.strip())
+                            current_word_tokens = []
+                    
+                    current_word_tokens.extend(word_tokens)
+                
+                # Add remaining words as current chunk start
+                if current_word_tokens:
+                    current_chunk_tokens = current_word_tokens
             else:
-                current_chunk += full_segment
-    else:
-        # No punctuation, split by words as last resort
-        current_chunk = text
-    
-    # If we still have a large chunk, split by words
-    if current_chunk and len(current_chunk) > max_chars:
-        word_chunks = _split_by_words(current_chunk, max_chars)
-        chunks.extend(word_chunks)
-    elif current_chunk.strip():
-        chunks.append(current_chunk.strip())
-    
-    return chunks
-
-
-def _split_by_words(text: str, max_chars: int) -> list[str]:
-    """
-    Split text by words as the last resort.
-    """
-    chunks = []
-    current_chunk = ""
-    words = text.split()
-    
-    for word in words:
-        if len(current_chunk) + len(word) + 1 > max_chars:
-            if current_chunk.strip():
-                chunks.append(current_chunk.strip())
-                current_chunk = word
-            else:
-                # Single word is extremely long (rare), just add it
-                chunks.append(word)
-                current_chunk = ""
+                # Sentence fits, make it the start of next chunk
+                current_chunk_tokens = sentence_tokens
         else:
-            current_chunk += " " + word if current_chunk else word
+            # Add sentence to current chunk
+            if current_chunk_tokens:  # Add space between sentences
+                current_chunk_tokens.extend(enc.encode(" "))
+            current_chunk_tokens.extend(sentence_tokens)
     
-    if current_chunk.strip():
-        chunks.append(current_chunk.strip())
+    # Add final chunk if it has content
+    if current_chunk_tokens:
+        chunk_text = enc.decode(current_chunk_tokens)
+        chunks.append(chunk_text.strip())
     
     return chunks
 
@@ -506,50 +551,12 @@ async def summarize_transcription_file_tool(
     max_summary_length: int = 500
 ) -> Dict[str, Any]:
     """Tool for comprehensive summarization of transcription files with key points and action extraction."""
-    transcription_paths = [
-        Path("../data/transcriptions"),  # From api directory
-        Path("data/transcriptions"),      # From project root
-        Path("/Users/sadamyan/workdir/agentic-asr/data/transcriptions"),  # Absolute path
-    ]
-    
-    file_path = None
-    for base_path in transcription_paths:
-        # First try exact match
-        potential_path = base_path / filename
-        if potential_path.exists():
-            file_path = potential_path
-            break
-        
-        # Try with different extensions if not already has one
-        for ext in ['.txt', '.json', '.md']:
-            if not filename.endswith(ext):
-                potential_path = base_path / f"{filename}{ext}"
-                if potential_path.exists():
-                    file_path = potential_path
-                    break
-        if file_path:
-            break
-            
-        # Try fuzzy matching for common variations (spaces, case, etc.)
-        if not file_path and base_path.exists():
-            import re
-            # Create a pattern that allows for flexible matching
-            normalized_filename = re.sub(r'[^\w]', '', filename.lower())
-            for file_candidate in base_path.glob('*'):
-                if file_candidate.is_file():
-                    candidate_normalized = re.sub(r'[^\w]', '', file_candidate.stem.lower())
-                    if normalized_filename in candidate_normalized or candidate_normalized in normalized_filename:
-                        # Additional check for common patterns like "Rearrange #261" vs "Rearrange#261"
-                        if abs(len(normalized_filename) - len(candidate_normalized)) <= 2:
-                            file_path = file_candidate
-                            break
-        if file_path:
-            break
+    file_path = find_transcription_file(filename)
     
     if not file_path:
         return {
             "success": False,
-            "error": f"Transcription file '{filename}' not found in any of the transcription directories: {[str(p) for p in transcription_paths]}"
+            "error": f"Transcription file '{filename}' not found in any of the transcription directories: {[str(p) for p in Config.get_transcription_paths()]}"
         }
     
     try:
@@ -611,23 +618,18 @@ Ensure all text content (summary, key points, actions) is in the same language a
         }
 
     # Check if content needs chunking (estimate tokens)
-    estimated_tokens = len(content) // 4  # Rough estimate: 1 token ≈ 4 characters
+    estimated_tokens = count_tokens(content)
     
     print(f"Esimated tokens: {estimated_tokens}, Max summary length: {max_summary_length}")
 
-    llm_config = LLMProviderConfig(
-        provider_name="openai",
-        model="gpt-4o",
-        api_key=os.getenv("OPENAI_API_KEY"),
-        temperature=0.3
-    )
+    llm_config = create_default_llm_config()
     llm_provider = create_llm_provider(llm_config)
 
     # For comprehensive summaries, we'll use structured outputs
     use_structured_output = (summary_type == "comprehensive")
 
-    if estimated_tokens > 10000:  # If content is too large, chunk it (conservative threshold for summaries)
-        chunks = chunk_text(content, max_tokens=8000)  # Smaller, safer chunks for better processing
+    if estimated_tokens > Config.SUMMARIZATION_MAX_TOKENS:  # If content is too large, chunk it
+        chunks = chunk_text(content, max_tokens=Config.SUMMARIZATION_CHUNK_TOKENS)  # Use config values for chunking
         
         print(f"Content is large ({estimated_tokens} estimated tokens), splitting into {len(chunks)} chunks")
         
@@ -944,50 +946,12 @@ async def translate_transcription_file_tool(
     source_language: str = "auto-detect"
 ) -> Dict[str, Any]:
     """Tool for translating transcription files to target language using LLM."""
-    transcription_paths = [
-        Path("../data/transcriptions"),  # From api directory
-        Path("data/transcriptions"),      # From project root
-        Path("/Users/sadamyan/workdir/agentic-asr/data/transcriptions"),  # Absolute path
-    ]
-    
-    file_path = None
-    for base_path in transcription_paths:
-        # First try exact match
-        potential_path = base_path / filename
-        if potential_path.exists():
-            file_path = potential_path
-            break
-        
-        # Try with different extensions if not already has one
-        for ext in ['.txt', '.json', '.md']:
-            if not filename.endswith(ext):
-                potential_path = base_path / f"{filename}{ext}"
-                if potential_path.exists():
-                    file_path = potential_path
-                    break
-        if file_path:
-            break
-            
-        # Try fuzzy matching for common variations (spaces, case, etc.)
-        if not file_path and base_path.exists():
-            import re
-            # Create a pattern that allows for flexible matching
-            normalized_filename = re.sub(r'[^\w]', '', filename.lower())
-            for file_candidate in base_path.glob('*'):
-                if file_candidate.is_file():
-                    candidate_normalized = re.sub(r'[^\w]', '', file_candidate.stem.lower())
-                    if normalized_filename in candidate_normalized or candidate_normalized in normalized_filename:
-                        # Additional check for common patterns like "Rearrange #261" vs "Rearrange#261"
-                        if abs(len(normalized_filename) - len(candidate_normalized)) <= 2:
-                            file_path = file_candidate
-                            break
-        if file_path:
-            break
+    file_path = find_transcription_file(filename)
     
     if not file_path:
         return {
             "success": False,
-            "error": f"Transcription file '{filename}' not found in any of the transcription directories: {[str(p) for p in transcription_paths]}"
+            "error": f"Transcription file '{filename}' not found in any of the transcription directories: {[str(p) for p in Config.get_transcription_paths()]}"
         }
     
     try:
@@ -1021,7 +985,7 @@ async def translate_transcription_file_tool(
         }
 
     # Check if content needs chunking for translation
-    estimated_tokens = len(content) // 4  # Rough estimate: 1 token ≈ 4 characters
+    estimated_tokens = count_tokens(content)
 
     llm_config = LLMProviderConfig(
         provider_name="openai",
@@ -1031,8 +995,8 @@ async def translate_transcription_file_tool(
     )
     llm_provider = create_llm_provider(llm_config)
 
-    if estimated_tokens > 2000:  # Ultra-aggressive threshold - chunk anything over 2k tokens (8k chars)
-        chunks = chunk_text(content, max_tokens=1500)  # Ultra-small chunks for maximum reliability
+    if estimated_tokens > Config.TRANSLATION_MAX_TOKENS:  # Use configured threshold for translation chunking
+        chunks = chunk_text(content, max_tokens=Config.TRANSLATION_CHUNK_TOKENS)  # Use configured chunk size
         
         # Translate each chunk
         translated_chunks = []
@@ -1259,7 +1223,7 @@ async def get_transcription_content_tool(
         }
 
     # Check if content is too large and needs to be truncated or chunked
-    estimated_tokens = len(content) // 4  # Rough estimate: 1 token ≈ 4 characters
+    estimated_tokens = count_tokens(content)
     is_large_content = estimated_tokens > 25000  # Conservative limit to prevent context overflow
     
     # For very large content, provide options
@@ -1746,7 +1710,6 @@ async def process_all_transcriptions_for_rag_tool(
             "error": f"Error processing transcriptions: {str(e)}"
         }
 
-
 @log_tool_call("get_vector_store_stats")
 async def get_vector_store_stats_tool() -> Dict[str, Any]:
     """Get statistics about the vector store."""
@@ -1981,36 +1944,6 @@ def get_enhanced_tools() -> list[ToolDefinition]:
                 "required": ["filename"]
             },
             function=process_transcription_for_rag_tool
-        ),
-        ToolDefinition(
-            name="semantic_search_transcriptions",
-            description="Search across all processed transcriptions using semantic similarity to find relevant content",
-            parameters={
-                "type": "object",
-                "properties": {
-                    "query": {
-                        "type": "string",
-                        "description": "The search query to find semantically similar content in transcriptions"
-                    },
-                    "top_k": {
-                        "type": "integer",
-                        "description": "Number of most similar results to return (default: 5)",
-                        "default": 5
-                    },
-                    "similarity_threshold": {
-                        "type": "number",
-                        "description": "Minimum similarity score threshold (0.0 to 1.0, default: 0.1)",
-                        "default": 0.1
-                    },
-                    "include_content": {
-                        "type": "boolean",
-                        "description": "Whether to include the actual content in results",
-                        "default": True
-                    }
-                },
-                "required": ["query"]
-            },
-            function=semantic_search_transcriptions_tool
         ),
         ToolDefinition(
             name="get_relevant_context",

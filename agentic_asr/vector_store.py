@@ -12,6 +12,8 @@ import numpy as np
 import faiss
 from sentence_transformers import SentenceTransformer
 
+from .config import Config
+
 logger = logging.getLogger(__name__)
 
 
@@ -20,13 +22,13 @@ class SimpleVectorStore:
     
     def __init__(
         self,
-        store_path: str = "data/faiss_indices",
-        model_name: str = "all-MiniLM-L6-v2"
+        store_path: Optional[str] = None,
+        model_name: Optional[str] = None
     ):
-        self.store_path = Path(store_path)
+        self.store_path = Path(store_path) if store_path else Config.FAISS_INDICES_DIR
         self.store_path.mkdir(parents=True, exist_ok=True)
         
-        self.model_name = model_name
+        self.model_name = model_name or Config.VECTOR_STORE_MODEL
         self.model = None
         self.index = None
         self.metadata = {}
@@ -125,11 +127,15 @@ class SimpleVectorStore:
         self,
         filename: str,
         content: str,
-        chunk_size: int = 1000,
-        overlap: int = 200
+        chunk_size: Optional[int] = None,
+        overlap: Optional[int] = None
     ) -> Dict[str, Any]:
         """Add a document to the vector store."""
         logger.info(f"Adding document: {filename}")
+        
+        # Use config defaults if not provided
+        chunk_size = chunk_size or Config.DEFAULT_CHUNK_SIZE
+        overlap = overlap or Config.DEFAULT_CHUNK_OVERLAP
         
         # Generate document ID
         doc_id = hashlib.sha256(f"{filename}_{content[:100]}".encode()).hexdigest()[:16]
