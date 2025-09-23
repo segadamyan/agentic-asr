@@ -29,6 +29,7 @@ sys.path.append('..')
 from agentic_asr.core.agent import create_asr_agent
 from agentic_asr.core.history import HistoryManager
 from agentic_asr.core.models import LLMProviderConfig
+from agentic_asr.config import Config
 
 
 from agentic_asr.tools.enhanced import (
@@ -110,9 +111,9 @@ history_manager: Optional[HistoryManager] = None
 active_agents: Dict[str, Any] = {}
 
 # Configuration
-DATA_DIR = Path("../data")
-TRANSCRIPTIONS_DIR = DATA_DIR / "transcriptions"
-UPLOADS_DIR = DATA_DIR / "uploads"
+DATA_DIR = Config.DATA_DIR
+TRANSCRIPTIONS_DIR = Config.TRANSCRIPTIONS_DIR
+UPLOADS_DIR = Config.UPLOADS_DIR
 
 # Ensure directories exist
 UPLOADS_DIR.mkdir(exist_ok=True)
@@ -121,7 +122,7 @@ UPLOADS_DIR.mkdir(exist_ok=True)
 async def startup_event():
     """Initialize shared resources on startup."""
     global history_manager
-    database_url = os.getenv("DATABASE_URL", "sqlite+aiosqlite:///./data/agentic_asr.db")
+    database_url = os.getenv("DATABASE_URL", f"sqlite+aiosqlite:///{Config.DATABASE_PATH}")
     history_manager = HistoryManager(database_url)
     await history_manager.initialize()
 
@@ -144,15 +145,15 @@ async def shutdown_event():
 # Helper functions
 def get_llm_config() -> LLMProviderConfig:
     """Get LLM configuration from environment."""
-    provider = os.getenv("DEFAULT_LLM_PROVIDER", "openai")
-    model = os.getenv("DEFAULT_LLM_MODEL", "gpt-4o")
+    provider = os.getenv("DEFAULT_LLM_PROVIDER", Config.DEFAULT_LLM_PROVIDER)
+    model = os.getenv("DEFAULT_LLM_MODEL", Config.DEFAULT_LLM_MODEL)
     
     if provider == "openai":
-        api_key = os.getenv("OPENAI_API_KEY")
+        api_key = Config.OPENAI_API_KEY
         if not api_key:
             raise HTTPException(status_code=500, detail="OPENAI_API_KEY not configured")
     elif provider == "anthropic":
-        api_key = os.getenv("ANTHROPIC_API_KEY")
+        api_key = Config.ANTHROPIC_API_KEY
         if not api_key:
             raise HTTPException(status_code=500, detail="ANTHROPIC_API_KEY not configured")
     else:
@@ -162,7 +163,7 @@ def get_llm_config() -> LLMProviderConfig:
         provider_name=provider,
         model=model,
         api_key=api_key,
-        temperature=0.7
+        temperature=Config.DEFAULT_LLM_TEMPERATURE
     )
 
 async def get_or_create_agent(session_id: Optional[str] = None) -> Any:
@@ -191,7 +192,7 @@ Use the available tools to help users with their transcription-related tasks.{fi
     
     # Create new agent
     llm_config = get_llm_config()
-    database_url = os.getenv("DATABASE_URL", "sqlite+aiosqlite:///./data/agentic_asr.db")
+    database_url = os.getenv("DATABASE_URL", f"sqlite+aiosqlite:///{Config.DATABASE_PATH}")
     agent = await create_asr_agent(
         system_prompt=system_prompt,
         llm_config=llm_config,

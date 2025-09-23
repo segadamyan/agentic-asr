@@ -13,6 +13,7 @@ from rich.progress import Progress, SpinnerColumn, TextColumn
 
 from .core.agent import create_asr_agent
 from .core.models import LLMProviderConfig
+from .config import Config
 
 load_dotenv()
 
@@ -66,8 +67,8 @@ def analyze(
 @app.command()
 def chat(
         session_id: Optional[str] = typer.Option(None, "--session", "-s", help="Session ID to continue conversation"),
-        llm_provider: str = typer.Option("openai", "--provider", "-p", help="LLM provider (openai, anthropic)"),
-        model: str = typer.Option("gpt-4o", "--model", "-m", help="LLM model to use"),
+        llm_provider: str = typer.Option(Config.DEFAULT_LLM_PROVIDER, "--provider", "-p", help="LLM provider (openai, anthropic)"),
+        model: str = typer.Option(Config.DEFAULT_LLM_MODEL, "--model", "-m", help="LLM model to use"),
         database_url: Optional[str] = typer.Option(None, "--db", help="Database URL for history storage"),
         verbose: bool = typer.Option(False, "--verbose", "-v", help="Verbose output")
 ):
@@ -75,12 +76,12 @@ def chat(
 
     async def _chat():
         if llm_provider.lower() == "openai":
-            api_key = os.getenv("OPENAI_API_KEY")
+            api_key = Config.OPENAI_API_KEY
             if not api_key:
                 console.print("[red]Error: OPENAI_API_KEY not found in environment[/red]")
                 raise typer.Exit(1)
         elif llm_provider.lower() == "anthropic":
-            api_key = os.getenv("ANTHROPIC_API_KEY")
+            api_key = Config.ANTHROPIC_API_KEY
             if not api_key:
                 console.print("[red]Error: ANTHROPIC_API_KEY not found in environment[/red]")
                 raise typer.Exit(1)
@@ -97,7 +98,7 @@ def chat(
         console.print("[blue]Initializing ASR agent...[/blue]")
         agent = await create_asr_agent(
             llm_config=llm_config,
-            database_url=database_url or os.getenv("DATABASE_URL", "sqlite+aiosqlite:///./data/agentic_asr.db"),
+            database_url=database_url or os.getenv("DATABASE_URL", f"sqlite+aiosqlite:///{Config.DATABASE_PATH}"),
             session_id=session_id
         )
 
@@ -150,8 +151,8 @@ def process(
         text_file: str = typer.Argument(..., help="Text file to process"),
         query: str = typer.Argument(..., help="Query to ask about the text content"),
         output: Optional[str] = typer.Option(None, "--output", "-o", help="Output file for results"),
-        llm_provider: str = typer.Option("openai", "--provider", "-p", help="LLM provider"),
-        llm_model: str = typer.Option("gpt-4o", "--model", "-m", help="LLM model"),
+        llm_provider: str = typer.Option(Config.DEFAULT_LLM_PROVIDER, "--provider", "-p", help="LLM provider"),
+        llm_model: str = typer.Option(Config.DEFAULT_LLM_MODEL, "--model", "-m", help="LLM model"),
         verbose: bool = typer.Option(False, "--verbose", "-v", help="Verbose output")
 ):
     """Process text file: analyze and ask LLM about the content."""
@@ -163,9 +164,9 @@ def process(
             raise typer.Exit(1)
 
         if llm_provider.lower() == "openai":
-            api_key = os.getenv("OPENAI_API_KEY")
+            api_key = Config.OPENAI_API_KEY
         elif llm_provider.lower() == "anthropic":
-            api_key = os.getenv("ANTHROPIC_API_KEY")
+            api_key = Config.ANTHROPIC_API_KEY
         else:
             console.print(f"[red]Error: Unsupported LLM provider: {llm_provider}[/red]")
             raise typer.Exit(1)
@@ -229,7 +230,7 @@ def list_sessions(
     async def _list_sessions():
         from .core.history import HistoryManager
 
-        db_url = database_url or os.getenv("DATABASE_URL", "sqlite+aiosqlite:///./data/agentic_asr.db")
+        db_url = database_url or os.getenv("DATABASE_URL", f"sqlite+aiosqlite:///{Config.DATABASE_PATH}")
         history_manager = HistoryManager(db_url)
 
         try:
