@@ -49,6 +49,17 @@ class Config:
     DEFAULT_SIMILARITY_THRESHOLD = float(os.getenv("DEFAULT_SIMILARITY_THRESHOLD", "0.1"))
     MAX_CONTEXT_CHUNKS = int(os.getenv("MAX_CONTEXT_CHUNKS", "3"))
     
+    # Reranker Settings
+    DEFAULT_RERANKER = os.getenv("DEFAULT_RERANKER", "none")  # none, bm25, keyword_boost, cross_encoder, multilingual_cross_encoder
+    ENABLE_RERANKING = os.getenv("ENABLE_RERANKING", "false").lower() == "true"
+    
+    # Cross-Encoder Reranker Settings
+    CROSS_ENCODER_MODEL = os.getenv("CROSS_ENCODER_MODEL", "cross-encoder/ms-marco-MiniLM-L-6-v2")
+    MULTILINGUAL_CROSS_ENCODER_MODEL = os.getenv("MULTILINGUAL_CROSS_ENCODER_MODEL", "cross-encoder/mmarco-mMiniLMv2-L12-H384-v1")
+    CROSS_ENCODER_MAX_LENGTH = int(os.getenv("CROSS_ENCODER_MAX_LENGTH", "512"))
+    CROSS_ENCODER_BATCH_SIZE = int(os.getenv("CROSS_ENCODER_BATCH_SIZE", "32"))
+    ARMENIAN_BOOST_FACTOR = float(os.getenv("ARMENIAN_BOOST_FACTOR", "1.1"))
+    
     # Chunking Settings (for LLM context limits)
     DEFAULT_MAX_TOKENS = int(os.getenv("DEFAULT_MAX_TOKENS", "30000"))
     CORRECTION_MAX_TOKENS = int(os.getenv("CORRECTION_MAX_TOKENS", "2000"))
@@ -118,6 +129,17 @@ DEFAULT_CHUNK_OVERLAP=200
 DEFAULT_TOP_K=5
 DEFAULT_SIMILARITY_THRESHOLD=0.1
 MAX_CONTEXT_CHUNKS=3
+
+# Reranker Settings
+DEFAULT_RERANKER=none
+ENABLE_RERANKING=false
+
+# Cross-Encoder Reranker Settings (for Armenian and multilingual support)
+CROSS_ENCODER_MODEL=cross-encoder/ms-marco-MiniLM-L-6-v2
+MULTILINGUAL_CROSS_ENCODER_MODEL=cross-encoder/mmarco-mMiniLMv2-L12-H384-v1
+CROSS_ENCODER_MAX_LENGTH=512
+CROSS_ENCODER_BATCH_SIZE=32
+ARMENIAN_BOOST_FACTOR=1.1
 
 # Token Limits for Different Operations
 DEFAULT_MAX_TOKENS=30000

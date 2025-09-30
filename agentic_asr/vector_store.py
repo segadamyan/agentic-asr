@@ -13,6 +13,7 @@ import faiss
 from sentence_transformers import SentenceTransformer
 
 from .config import Config
+from .rerankers import get_reranker, BaseReranker
 
 logger = logging.getLogger(__name__)
 
@@ -23,7 +24,10 @@ class SimpleVectorStore:
     def __init__(
         self,
         store_path: Optional[str] = None,
-        model_name: Optional[str] = None
+        model_name: Optional[str] = None,
+        enable_reranking: Optional[bool] = None,
+        reranker_type: Optional[str] = None,
+        reranker_kwargs: Optional[Dict[str, Any]] = None
     ):
         self.store_path = Path(store_path) if store_path else Config.FAISS_INDICES_DIR
         self.store_path.mkdir(parents=True, exist_ok=True)
@@ -32,6 +36,33 @@ class SimpleVectorStore:
         self.model = None
         self.index = None
         self.metadata = {}
+        
+        # Reranker configuration
+        self.enable_reranking = enable_reranking if enable_reranking is not None else Config.ENABLE_RERANKING
+        reranker_type = reranker_type or Config.DEFAULT_RERANKER
+        
+        # Set up reranker kwargs with config defaults
+        if not reranker_kwargs:
+            reranker_kwargs = {}
+        
+        # Add config-based defaults for cross-encoder rerankers
+        if reranker_type == 'cross_encoder':
+            reranker_kwargs.setdefault('model_name', Config.CROSS_ENCODER_MODEL)
+            reranker_kwargs.setdefault('max_length', Config.CROSS_ENCODER_MAX_LENGTH)
+            reranker_kwargs.setdefault('batch_size', Config.CROSS_ENCODER_BATCH_SIZE)
+        elif reranker_type in ('multilingual_cross_encoder', 'multilingual', 'armenian'):
+            reranker_kwargs.setdefault('model_name', Config.MULTILINGUAL_CROSS_ENCODER_MODEL)
+            reranker_kwargs.setdefault('max_length', Config.CROSS_ENCODER_MAX_LENGTH)
+            reranker_kwargs.setdefault('batch_size', Config.CROSS_ENCODER_BATCH_SIZE)
+            reranker_kwargs.setdefault('armenian_boost', Config.ARMENIAN_BOOST_FACTOR)
+        
+        # Initialize reranker
+        if self.enable_reranking:
+            self.reranker = get_reranker(reranker_type, **reranker_kwargs)
+            logger.info(f"Initialized reranker: {self.reranker.name}")
+        else:
+            self.reranker = None
+            logger.info("Reranking disabled")
         
         self.index_file = self.store_path / "faiss_index.bin"
         self.metadata_file = self.store_path / "metadata.json"
@@ -44,7 +75,30 @@ class SimpleVectorStore:
         
         self._load_index()
         
-        logger.info(f"Vector store initialized. Index size: {self.index.ntotal if self.index else 0}")
+        reranker_info = f" with {self.reranker.name} reranker" if self.reranker else " (no reranking)"
+        logger.info(f"Vector store initialized{reranker_info}. Index size: {self.index.ntotal if self.index else 0}")
+    
+    def set_reranker(
+        self,
+        reranker_type: str,
+        enable: bool = True,
+        **kwargs
+    ):
+        """Set or change the reranker.
+        
+        Args:
+            reranker_type: Type of reranker ('none', 'bm25', 'keyword_boost')
+            enable: Whether to enable reranking
+            **kwargs: Additional arguments for reranker initialization
+        """
+        self.enable_reranking = enable
+        
+        if enable:
+            self.reranker = get_reranker(reranker_type, **kwargs)
+            logger.info(f"Set reranker to: {self.reranker.name}")
+        else:
+            self.reranker = None
+            logger.info("Reranking disabled")
     
     def _load_index(self):
         """Load existing FAISS index and metadata."""
@@ -200,19 +254,33 @@ class SimpleVectorStore:
         self,
         query: str,
         top_k: int = 5,
-        similarity_threshold: float = 0.0
+        similarity_threshold: float = 0.0,
+        use_reranking: Optional[bool] = None
     ) -> List[Dict[str, Any]]:
-        """Search for similar chunks."""
+        """Search for similar chunks.
+        
+        Args:
+            query: Search query
+            top_k: Number of results to return
+            similarity_threshold: Minimum similarity score
+            use_reranking: Override default reranking setting for this search
+        """
         if self.index.ntotal == 0:
             return []
         
         # Generate query embedding
         query_embedding = self.model.encode([query], normalize_embeddings=True)
         
+        # For reranking, we might want to retrieve more results initially
+        # to give the reranker more candidates to work with
+        search_k = top_k
+        if self.enable_reranking and (use_reranking is None or use_reranking):
+            search_k = min(top_k * 3, self.index.ntotal)  # Get 3x more for reranking
+        
         # Search
         similarities, indices = self.index.search(
             query_embedding.astype(np.float32), 
-            min(top_k, self.index.ntotal)
+            min(search_k, self.index.ntotal)
         )
         
         results = []
@@ -231,6 +299,17 @@ class SimpleVectorStore:
                     "similarity_score": float(sim),
                     "char_count": chunk_data["char_count"]
                 })
+        
+        # Apply reranking if enabled
+        if self.enable_reranking and self.reranker and (use_reranking is None or use_reranking):
+            try:
+                results = self.reranker.rerank(query, results, top_k)
+                logger.debug(f"Applied {self.reranker.name} reranking")
+            except Exception as e:
+                logger.warning(f"Reranking failed: {e}. Using original results.")
+                results = results[:top_k]
+        else:
+            results = results[:top_k]
         
         return results
     
@@ -268,7 +347,9 @@ class SimpleVectorStore:
             "model_name": self.model_name,
             "store_path": str(self.store_path),
             "index_file_exists": self.index_file.exists(),
-            "index_file_size": self.index_file.stat().st_size if self.index_file.exists() else 0
+            "index_file_size": self.index_file.stat().st_size if self.index_file.exists() else 0,
+            "reranking_enabled": self.enable_reranking,
+            "reranker_name": self.reranker.name if self.reranker else None
         }
     
     def list_documents(self) -> List[Dict[str, Any]]:
