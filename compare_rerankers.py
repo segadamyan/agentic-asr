@@ -32,53 +32,84 @@ class RerankerComparator:
         self.vector_store = None
         self.test_queries = []
         
-    def load_data_from_vector_store(self, limit: int = 20) -> List[Dict[str, Any]]:
-        """Load data from existing vector store."""
-        print("Loading data from existing vector store...")
+    def load_data_from_vector_store(self, query: str, limit: int = 20) -> List[Dict[str, Any]]:
+        """Load data from existing vector store for a specific query."""
+        print(f"Loading data from vector store for query: '{query[:50]}...'")
+        
+        from agentic_asr.vector_store import get_vector_store
+        
+        # Initialize vector store
+        vector_store = get_vector_store()
+        vector_store.initialize()
+        
+        # Get statistics
+        stats = vector_store.get_stats()
+        print(f"Vector store contains {stats['total_documents']} documents with {stats['total_chunks']} chunks")
+        
+        if stats['total_chunks'] == 0:
+            raise ValueError("No data in vector store. Please add some data first.")
+        
+        # Search for chunks relevant to the specific query
+        results = []
+        seen_chunks = set()  # Track chunks we've already added
         
         try:
-            from agentic_asr.vector_store import get_vector_store
+            # Primary search with the actual query
+            search_results = vector_store.search(
+                query=query,
+                top_k=limit * 2,  # Get more results to account for deduplication
+                similarity_threshold=0.1,
+                use_reranking=False  # We'll test reranking separately
+            )
             
-            # Initialize vector store
-            vector_store = get_vector_store()
-            vector_store.initialize()
-            
-            # Get statistics
-            stats = vector_store.get_stats()
-            print(f"Vector store contains {stats['total_documents']} documents with {stats['total_chunks']} chunks")
-            
-            if stats['total_chunks'] == 0:
-                print("No data in vector store. Using AI-related sample data.")
-                return self._create_ai_sample_data()
-            
-            # Use AI-related queries to get relevant chunks
-            ai_queries = [
-                "արհեստական բանականություն",  # artificial intelligence in Armenian
-                "տեխնոլոգիա",  # technology
-                "ծրագրավորում",  # programming
-                "ալգորիթմ",  # algorithm
-                "նեյրոնային ցանց",  # neural network
-                "մեքենայական ուսուցում",  # machine learning
-                "գիտություն",  # science
-                "հետազոտություն"  # research
-            ]
-            
-            results = []
-            chunks_per_query = max(1, limit // len(ai_queries))
-            
-            for query in ai_queries:
-                try:
-                    search_results = vector_store.search(
-                        query=query,
-                        top_k=chunks_per_query,
-                        similarity_threshold=0.1,
-                        use_reranking=False  # We'll test reranking separately
-                    )
+            for result in search_results:
+                chunk_id = result.get("chunk_id", "unknown")
+                
+                # Skip if we've already seen this chunk
+                if chunk_id in seen_chunks:
+                    continue
+                
+                # Add to seen set
+                seen_chunks.add(chunk_id)
+                
+                # Create a display name that includes chunk info
+                filename = result.get("filename", "unknown")
+                display_name = f"{filename}[{chunk_id}]"
+                
+                results.append({
+                    "chunk_id": chunk_id,
+                    "content": result["content"],
+                    "filename": filename,
+                    "display_name": display_name,
+                    "language": "armenian",  # Based on your data
+                    "similarity_score": result["similarity_score"]
+                })
+                
+                if len(results) >= limit:
+                    break
                     
-                    for result in search_results:
-                        # Create a display name that includes chunk info
+        except Exception as e:
+            print(f"Error searching for query '{query[:30]}...': {e}")
+        
+        if not results:
+            raise ValueError(f"No relevant content found for query: '{query[:50]}...'. Please check if the vector store contains relevant data.")
+        
+        # If we don't have enough diverse results, try a broader search
+        if len(results) < limit:
+            print(f"Only found {len(results)} unique chunks for query, trying broader search...")
+            try:
+                broader_results = vector_store.search(
+                    query="",  # Empty query to get most diverse results
+                    top_k=limit * 2,
+                    similarity_threshold=0.0,  # Lower threshold
+                    use_reranking=False
+                )
+                
+                for result in broader_results:
+                    chunk_id = result.get("chunk_id", "unknown")
+                    if chunk_id not in seen_chunks:
+                        seen_chunks.add(chunk_id)
                         filename = result.get("filename", "unknown")
-                        chunk_id = result.get("chunk_id", "unknown")
                         display_name = f"{filename}[{chunk_id}]"
                         
                         results.append({
@@ -86,178 +117,73 @@ class RerankerComparator:
                             "content": result["content"],
                             "filename": filename,
                             "display_name": display_name,
-                            "language": "armenian",  # Based on your data
+                            "language": "armenian",
                             "similarity_score": result["similarity_score"]
                         })
                         
                         if len(results) >= limit:
                             break
-                            
-                except Exception as e:
-                    print(f"Error searching for '{query}': {e}")
-                    continue
-                
-                if len(results) >= limit:
-                    break
-            
-            if not results:
-                print("No relevant AI content found. Using sample data.")
-                return self._create_ai_sample_data()
-            
-            print(f"Loaded {len(results)} AI-related chunks from vector store")
-            return results[:limit]
-            
-        except Exception as e:
-            print(f"Error accessing vector store: {e}")
-            return self._create_ai_sample_data()
+            except Exception as e:
+                print(f"Broader search failed: {e}")
+        
+        print(f"Loaded {len(results)} unique chunks for query")
+        print(f"Top chunk IDs: {[r.get('chunk_id', '?') for r in results[:10]]}")
+        return results[:limit]
     
-    def _create_chunks(self, text: str, chunk_size: int = 500) -> List[str]:
-        """Split text into chunks."""
-        if len(text) <= chunk_size:
-            return [text]
-        
-        chunks = []
-        words = text.split()
-        current_chunk = []
-        current_length = 0
-        
-        for word in words:
-            if current_length + len(word) + 1 > chunk_size and current_chunk:
-                chunks.append(" ".join(current_chunk))
-                current_chunk = [word]
-                current_length = len(word)
-            else:
-                current_chunk.append(word)
-                current_length += len(word) + 1
-        
-        if current_chunk:
-            chunks.append(" ".join(current_chunk))
-        
-        return chunks
-    
-    def _create_ai_sample_data(self) -> List[Dict[str, Any]]:
-        """Create AI-related sample data for testing."""
-        print("Using AI-related sample data for comparison...")
-        return [
-            {
-                "chunk_id": "1",
-                "content": "Արհեստական բանականությունը և մեքենայական ուսուցումը ժամանակակից տեխնոլոգիաների հիմքն են: Նեյրոնային ցանցերը կարող են սովորել բարդ օրինաչափություններ տվյալներից:",
-                "similarity_score": 0.95,
-                "filename": "ai_basics_armenian.txt",
-                "display_name": "ai_basics_armenian.txt[1]",
-                "language": "armenian"
-            },
-            {
-                "chunk_id": "2",
-                "content": "Deep learning algorithms use neural networks with multiple layers to process and analyze large amounts of data. These systems can recognize patterns and make predictions with high accuracy.",
-                "similarity_score": 0.92,
-                "filename": "deep_learning_english.txt",
-                "display_name": "deep_learning_english.txt[2]",
-                "language": "english"
-            },
-            {
-                "chunk_id": "3",
-                "content": "Գիտական հետազոտությունները ցույց են տալիս, որ արհեստական ինտելեկտը կարող է օգտագործվել բժշկության, կրթության և գիտության ոլորտներում: Ալգորիթմները զարգանում են շատ արագ:",
-                "similarity_score": 0.89,
-                "filename": "ai_research_armenian.txt",
-                "display_name": "ai_research_armenian.txt[3]",
-                "language": "armenian"
-            },
-            {
-                "chunk_id": "4",
-                "content": "Natural language processing enables computers to understand and generate human language. This technology powers chatbots, translation services, and text analysis tools.",
-                "similarity_score": 0.86,
-                "filename": "nlp_technology.txt",
-                "display_name": "nlp_technology.txt[4]",
-                "language": "english"
-            },
-            {
-                "chunk_id": "5",
-                "content": "Ծրագրավորման նոր մեթոդները թույլ են տալիս ստեղծել ավելի արդյունավետ ալգորիթմներ: Python և R լեզուները լայնորեն օգտագործվում են տվյալների գիտության մեջ:",
-                "similarity_score": 0.83,
-                "filename": "programming_data_science.txt",
-                "display_name": "programming_data_science.txt[5]",
-                "language": "armenian"
-            },
-            {
-                "chunk_id": "6",
-                "content": "Computer vision technology allows machines to interpret and understand visual information from the world. Applications include facial recognition, autonomous vehicles, and medical imaging.",
-                "similarity_score": 0.80,
-                "filename": "computer_vision.txt",
-                "display_name": "computer_vision.txt[6]",
-                "language": "english"
-            },
-            {
-                "chunk_id": "7",
-                "content": "Տեխնոլոգիական ինովացիաները փոխում են մեր առօրյա կյանքը: Արհեստական բանականությունը օգնում է լուծել բարդ խնդիրներ տարբեր ոլորտներում:",
-                "similarity_score": 0.77,
-                "filename": "tech_innovation_armenian.txt",
-                "display_name": "tech_innovation_armenian.txt[7]",
-                "language": "armenian"
-            },
-            {
-                "chunk_id": "8",
-                "content": "Machine learning models require large datasets for training. Feature engineering and data preprocessing are crucial steps in developing accurate predictive models.",
-                "similarity_score": 0.74,
-                "filename": "ml_training_data.txt",
-                "display_name": "ml_training_data.txt[8]",
-                "language": "english"
-            },
-            {
-                "chunk_id": "9",
-                "content": "Գիտության և տեխնոլոգիաների զարգացումը պահանջում է մասնագիտական գիտելիքներ և անընդհատ ուսուցում: Քվանտային հաշվարկները նոր հնարավորություններ են բացում:",
-                "similarity_score": 0.71,
-                "filename": "quantum_computing_armenian.txt",
-                "display_name": "quantum_computing_armenian.txt[9]",
-                "language": "armenian"
-            },
-            {
-                "chunk_id": "10",
-                "content": "Artificial intelligence ethics and responsible AI development are becoming increasingly important as these technologies impact society. Bias detection and fairness in algorithms are key concerns.",
-                "similarity_score": 0.68,
-                "filename": "ai_ethics.txt",
-                "display_name": "ai_ethics.txt[10]",
-                "language": "english"
-            }
-        ]
-    
+
+
     def get_test_queries(self) -> List[Dict[str, str]]:
         """Get AI-related test queries in different languages."""
         return [
             {
-                "query": "արհեստական բանականություն և մեքենայական ուսուցում",
+                "query": "Ինչպե՞ս է արհեստական բանականության էժանացումը ազդելու ծրագրավորողների աշխատաշուկայի և աշխատավարձերի վրա։",
                 "language": "armenian",
-                "description": "Armenian: artificial intelligence and machine learning"
+                "description": "Armenian: AI impact on programmer job market and salaries"
             },
             {
-                "query": "neural networks deep learning algorithms",
-                "language": "english", 
-                "description": "English: neural networks and deep learning"
-            },
-            {
-                "query": "ծրագրավորման լեզուներ և ալգորիթմներ",
+                "query": "Ինչպե՞ս է արհեստական բանականությունը փոխում բիզնեսների թվայնացման արժեքը և շուկայի պահանջարկը։",
                 "language": "armenian",
-                "description": "Armenian: programming languages and algorithms"
+                "description": "Armenian: AI changing business digitization value and market demand"
             },
             {
-                "query": "computer vision natural language processing",
-                "language": "english",
-                "description": "English: computer vision and NLP"
+                "query": "Ի՞նչ սոցիալական վտանգներ և վարքային փոփոխություններ կարող են առաջանալ, երբ մարդիկ սկսեն շփվել արհեստական ընկերների հետ։",
+                "language": "armenian",
+                "description": "Armenian: Social dangers and behavioral changes from AI companions"
             },
             {
-                "query": "տեխնոլոգիական ինովացիա և գիտություն",
+                "query": "Ինչո՞ւ է արհեստական բանականության հեղափոխությունը հաճախ համեմատվում ԽՍՀՄ փլուզման հետ՝ ադապտացման տեսանկյունից։",
+                "language": "armenian",
+                "description": "Armenian: AI revolution compared to USSR collapse in adaptation terms"
+            },
+            {
+                "query": "Ինչպե՞ս է OpenAI-ի մոտեցումը՝ «թողնել մոդելին ավելի երկար մտածել», բարելավում արդյունքների որակը։",
                 "language": "armenian", 
-                "description": "Armenian: technological innovation and science"
+                "description": "Armenian: OpenAI approach of letting models think longer"
             },
             {
-                "query": "machine learning model training data",
-                "language": "english",
-                "description": "English: ML model training"
-            },
-            {
-                "query": "գիտական հետազոտություններ և տվյալներ",
+                "query": "Ինչու՞ է GPU-ների զարգացումը դարձել կենտրոնական գործոն արհեստական բանականության առաջխաղացման մեջ։",
                 "language": "armenian",
-                "description": "Armenian: scientific research and data"
+                "description": "Armenian: GPU development as central factor in AI advancement"
+            },
+            {
+                "query": "Ինչպե՞ս է արհեստական բանականությունը փոխելու կրթական համակարգը և մասնագիտական աճի մոդելները։",
+                "language": "armenian",
+                "description": "Armenian: AI changing education systems and professional growth models"
+            },
+            {
+                "query": "Ինչո՞ւ է գրել սովորելը համեմատվում սպորտային մարզումների հետ՝ որպես մտավոր հմտություն պահպանելու միջոց։",
+                "language": "armenian",
+                "description": "Armenian: Learning to write compared to sports training as intellectual skill preservation"
+            },
+            {
+                "query": "Ինչպե՞ս կարող է արհեստական բանականությունը բարձրացնել պետական կառավարման արդյունավետությունը և կրճատել բյուրոկրատիան։",
+                "language": "armenian",
+                "description": "Armenian: AI improving government efficiency and reducing bureaucracy"
+            },
+            {
+                "query": "Ի՞նչ տնտեսական և կառավարման հետևանքներ կարող են առաջանալ, երբ ծրագրային ապահովումը դառնում է էժան և հասանելի բոլորին։",
+                "language": "armenian",
+                "description": "Armenian: Economic and governance consequences when software becomes cheap and accessible"
             }
         ]
     
@@ -293,7 +219,7 @@ class RerankerComparator:
                     "type": "llm_agent",
                     "kwargs": {
                         "provider_name": "anthropic" if Config.ANTHROPIC_API_KEY else "openai",
-                        "model": "claude-3-haiku-20240307" if Config.ANTHROPIC_API_KEY else "gpt-3.5-turbo",
+                        "model": "claude-sonnet-4-20250514" if Config.ANTHROPIC_API_KEY else "gpt-5",
                         "max_chunks_per_batch": 3  # Limit for cost control
                     },
                     "name": "LLM Agent"
@@ -305,6 +231,18 @@ class RerankerComparator:
         
         return rerankers
     
+    def _get_expected_class_name(self, reranker_type: str) -> str:
+        """Get the expected class name for a reranker type."""
+        type_to_class = {
+            "none": "NoReranker",
+            "bm25": "BM25Reranker", 
+            "keyword_boost": "KeywordBoostReranker",
+            "cross_encoder": "CrossEncoderReranker",
+            "multilingual_cross_encoder": "MultilingualCrossEncoderReranker",
+            "llm_agent": "LLMAgentReranker"
+        }
+        return type_to_class.get(reranker_type, f"{reranker_type}Reranker")
+
     def evaluate_reranker(
         self,
         reranker_config: Dict[str, Any],
@@ -312,11 +250,19 @@ class RerankerComparator:
         results: List[Dict[str, Any]]
     ) -> Dict[str, Any]:
         """Evaluate a single reranker."""
+        reranker_name = reranker_config["name"]
+        
         try:
             start_time = time.time()
             
             # Initialize reranker
             reranker = get_reranker(reranker_config["type"], **reranker_config["kwargs"])
+            
+            # Only show warning for actual fallbacks (like LLM -> BM25)
+            if hasattr(reranker, 'name') and "fallback" in reranker.name:
+                reranker_name = f"{reranker_config['name']} (→ BM25)"
+            else:
+                reranker_name = reranker_config["name"]
             
             # Rerank results
             reranked = reranker.rerank(query, results.copy(), top_k=5)
@@ -328,7 +274,7 @@ class RerankerComparator:
             avg_score = sum(r.get("similarity_score", 0) for r in reranked[:3]) / min(3, len(reranked))
             
             return {
-                "name": reranker_config["name"],
+                "name": reranker_name,
                 "top_3_results": [r.get("display_name", f"{r['filename']}[{r.get('chunk_id', '?')}]") for r in reranked[:3]],
                 "armenian_in_top_3": armenian_results,
                 "avg_similarity": avg_score,
@@ -338,8 +284,9 @@ class RerankerComparator:
             }
             
         except Exception as e:
+            print(f"ERROR in {reranker_name}: {str(e)}")
             return {
-                "name": reranker_config["name"],
+                "name": f"{reranker_name} (ERROR)",
                 "error": str(e),
                 "top_3_results": [],
                 "armenian_in_top_3": 0,
@@ -366,12 +313,6 @@ class RerankerComparator:
         print("🔍 Reranker Comparison Tool")
         print("=" * 50)
         
-        # Load data
-        sample_data = self.load_data_from_vector_store()
-        if not sample_data:
-            print("No data available for comparison.")
-            return
-        
         # Get test queries
         test_queries = self.get_test_queries()
         
@@ -379,7 +320,7 @@ class RerankerComparator:
         rerankers = self.get_available_rerankers()
         
         print(f"\nTesting {len(rerankers)} rerankers with {len(test_queries)} queries")
-        print(f"Using {len(sample_data)} document chunks\n")
+        print(f"Loading fresh data from vector store for each query\n")
         
         # Run comparisons
         all_results = []
@@ -391,10 +332,20 @@ class RerankerComparator:
             print(f"\n📋 Query: '{query}' ({query_info['description']})")
             print("-" * 60)
             
+            # Load data specifically for this query
+            try:
+                query_data = self.load_data_from_vector_store(query, limit=10)
+                if not query_data:
+                    print(f"No data found for query, skipping...")
+                    continue
+            except Exception as e:
+                print(f"Error loading data for query: {e}")
+                continue
+            
             query_results = []
             
             for reranker_config in rerankers:
-                result = self.evaluate_reranker(reranker_config, query, sample_data)
+                result = self.evaluate_reranker(reranker_config, query, query_data)
                 result["query"] = query
                 result["query_language"] = query_lang
                 query_results.append(result)
