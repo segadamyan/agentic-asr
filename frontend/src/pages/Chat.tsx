@@ -31,6 +31,7 @@ import {
   Settings,
 } from '@mui/icons-material';
 import { apiService, ChatMessage, ChatResponse } from '../services/api.ts';
+import MarkdownRenderer from '../components/MarkdownRenderer.tsx';
 
 interface Message {
   id: string;
@@ -226,13 +227,17 @@ const Chat: React.FC = () => {
                     }
                     secondary={
                       <Box mt={0.5}>
-                        <Typography 
-                          variant="body1" 
-                          component="div" 
-                          sx={{ whiteSpace: 'pre-wrap' }}
-                        >
-                          {message.content}
-                        </Typography>
+                        {message.type === 'assistant' ? (
+                          <MarkdownRenderer content={message.content} />
+                        ) : (
+                          <Typography 
+                            variant="body1" 
+                            component="div" 
+                            sx={{ whiteSpace: 'pre-wrap' }}
+                          >
+                            {message.content}
+                          </Typography>
+                        )}
                         {message.toolCalls && renderToolCalls(message.toolCalls)}
                       </Box>
                     }

@@ -11,6 +11,7 @@ import Chat from './pages/Chat.tsx';
 import Analysis from './pages/Analysis.tsx';
 import Sessions from './pages/Sessions.tsx';
 import SummariesAndTranslations from './pages/SummariesAndTranslations.tsx';
+import MarkdownDemo from './pages/MarkdownDemo.tsx';
 
 const theme = createTheme({
   palette: {
@@ -72,6 +73,7 @@ function App() {
               <Route path="/analysis" element={<Analysis />} />
               <Route path="/sessions" element={<Sessions />} />
               <Route path="/summaries" element={<SummariesAndTranslations />} />
+              <Route path="/markdown-demo" element={<MarkdownDemo />} />
             </Routes>
           </Box>
         </Box>
